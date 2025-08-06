@@ -1,21 +1,20 @@
-const CACHE_NAME = 'jp-flashcards-cache-v1';
+const CACHE_NAME = 'gaku-app-cache-v2';
 const urlsToCache = [
   '/',
   '/index.html',
   '/index.css',
-  '/index.tsx',
+  '/manifest.json',
   '/icon.svg',
-  'https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700&family=Roboto:wght@400;700&display=swap'
 ];
 
 let notificationTimeoutId = null;
 
-// Install service worker and activate immediately
+// Install service worker and cache static assets
 self.addEventListener('install', event => {
   event.waitUntil(
     caches.open(CACHE_NAME)
       .then(cache => {
-        console.log('Opened cache');
+        console.log('Service Worker: Caching app shell');
         return cache.addAll(urlsToCache);
       })
       .then(() => self.skipWaiting())
@@ -30,6 +29,7 @@ self.addEventListener('activate', event => {
       return Promise.all(
         cacheNames.map(cacheName => {
           if (cacheWhitelist.indexOf(cacheName) === -1) {
+            console.log('Service Worker: Deleting old cache', cacheName);
             return caches.delete(cacheName);
           }
         })
@@ -38,14 +38,45 @@ self.addEventListener('activate', event => {
   );
 });
 
-// Serve cached content when offline
+// Serve cached content when offline, and cache new assets on the fly
 self.addEventListener('fetch', event => {
+  // Only handle GET requests
+  if (event.request.method !== 'GET') {
+    return;
+  }
+  
+  // Don't cache API calls from Netlify Functions
+  if (event.request.url.includes('/.netlify/functions/')) {
+    return; // Fallback to network, do not cache
+  }
+
+  // Use a "Cache, falling back to network" strategy
   event.respondWith(
     caches.match(event.request)
-      .then(response => {
-        return response || fetch(event.request);
-      }
-    )
+      .then(cachedResponse => {
+        // If the resource is in the cache, return it
+        if (cachedResponse) {
+          return cachedResponse;
+        }
+
+        // If the resource is not in the cache, fetch it from the network
+        return fetch(event.request).then(
+          networkResponse => {
+            // If we got a valid response, clone it and cache it for future use
+            if (networkResponse && networkResponse.status === 200) {
+              const responseToCache = networkResponse.clone();
+              caches.open(CACHE_NAME)
+                .then(cache => {
+                  cache.put(event.request, responseToCache);
+                });
+            }
+            return networkResponse;
+          }
+        ).catch(error => {
+            console.error('Fetch failed; returning offline might be an option here.', error);
+            // Optionally, return an offline fallback page if you have one cached
+        });
+      })
   );
 });
 
