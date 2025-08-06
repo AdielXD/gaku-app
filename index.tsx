@@ -1385,6 +1385,63 @@ const CommunityView: React.FC<{
 
 // --- MAIN APP COMPONENT ---
 const App = () => {
+    // --- ONE-TIME DATA MIGRATION ---
+    useEffect(() => {
+        const runDataMigration = () => {
+            const migrationKey = 'gaku-migration-v1-complete';
+            if (localStorage.getItem(migrationKey) === 'true') {
+                return false; // Migration already done, no reload needed
+            }
+
+            console.log("Running one-time data migration check...");
+
+            const keyMap = {
+                'cards': 'gaku-cards',
+                'studyHistory': 'gaku-study-history',
+                'reviewSettings': 'gaku-review-settings',
+                'theme': 'gaku-theme'
+            };
+
+            let migrationOccurred = false;
+
+            for (const [oldKey, newKey] of Object.entries(keyMap)) {
+                const oldData = localStorage.getItem(oldKey);
+                const newData = localStorage.getItem(newKey);
+
+                if (oldData && !newData) {
+                    try {
+                        // Validate JSON before setting to prevent corrupting data
+                        JSON.parse(oldData); 
+                        localStorage.setItem(newKey, oldData);
+                        localStorage.removeItem(oldKey);
+                        console.log(`Successfully migrated data from '${oldKey}' to '${newKey}'.`);
+                        migrationOccurred = true;
+                    } catch (e) {
+                        console.error(`Could not migrate corrupt data for key '${oldKey}'.`, e);
+                    }
+                }
+            }
+            
+            // Mark migration as complete so it doesn't run again.
+            localStorage.setItem(migrationKey, 'true');
+
+            if (migrationOccurred) {
+                 console.log("Data migration complete. Reloading page to apply changes.");
+                 // Force a reload to ensure all state initializers use the migrated data.
+                 window.location.reload();
+                 return true; // Reloading page
+            }
+            return false; // No migration, no reload needed
+        };
+        
+        // This stops the rest of the app from rendering if a reload is about to happen.
+        const isReloading = runDataMigration();
+        if (isReloading) {
+            document.body.style.display = 'none'; // Hide body to prevent flash of old content
+        }
+
+    }, []); // Empty dependency array ensures it runs only once on mount.
+
     // --- STATE MANAGEMENT ---
     const [cards, setCards] = useState<Card[]>(() => {
         try {
