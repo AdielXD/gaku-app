@@ -4,24 +4,24 @@
   "description": "Um aplicativo de flashcards, estilo Anki, para ajudar a estudar japonês.",
   "icons": [
     {
-      "src": "icon.svg",
+      "src": "/icon.svg",
       "sizes": "any",
       "type": "image/svg+xml"
     },
     {
-      "src": "icon.svg",
+      "src": "/icon.svg",
       "sizes": "192x192",
       "type": "image/svg+xml",
       "purpose": "any"
     },
     {
-      "src": "icon.svg",
+      "src": "/icon.svg",
       "sizes": "512x512",
       "type": "image/svg+xml",
       "purpose": "any"
     }
   ],
-  "start_url": "/index.html",
+  "start_url": "/",
   "display": "standalone",
   "theme_color": "#008069",
   "background_color": "#f0f2f5"

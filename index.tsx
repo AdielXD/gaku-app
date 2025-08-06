@@ -216,8 +216,8 @@ const scheduleNotification = () => {
                     options: {
                         body: 'Suas cartas estão esperando por você. 頑張って!',
                         lang: 'pt-BR',
-                        icon: 'icon.svg',
-                        badge: 'icon.svg',
+                        icon: '/icon.svg',
+                        badge: '/icon.svg',
                         vibrate: [100, 50, 100],
                         tag: 'gaku-study-reminder',
                         requireInteraction: true,
@@ -2428,6 +2428,7 @@ if (container) {
 }
 
 // Register Service Worker
+/*
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('/sw.js').then(registration => {
@@ -2437,3 +2438,4 @@ if ('serviceWorker' in navigator) {
     });
   });
 }
+*/
