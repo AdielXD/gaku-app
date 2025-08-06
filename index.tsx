@@ -1388,13 +1388,54 @@ const App = () => {
     // --- ONE-TIME DATA MIGRATION ---
     useEffect(() => {
         const runDataMigration = () => {
-            const migrationKey = 'gaku-migration-v1-complete';
+            const migrationKey = 'gaku-migration-v2-supermemo-complete';
             if (localStorage.getItem(migrationKey) === 'true') {
                 return false; // Migration already done, no reload needed
             }
 
             console.log("Running one-time data migration check...");
+            let migrationOccurred = false;
 
+            // --- Migration from "jp_flashcards" with `level` property ---
+            const oldJpDataKey = 'jp_flashcards';
+            const oldJpData = localStorage.getItem(oldJpDataKey);
+            const newGakuDataKey = 'gaku-cards';
+
+            if (oldJpData) {
+                try {
+                    const parsedCards = JSON.parse(oldJpData);
+                    // Check if it's the old format (array of cards, and first card has 'level')
+                    if (Array.isArray(parsedCards) && parsedCards.length > 0 && parsedCards[0].hasOwnProperty('level') && !parsedCards[0].hasOwnProperty('repetitions')) {
+                        console.log(`Found old data format in '${oldJpDataKey}'. Migrating...`);
+
+                        const today = new Date().toISOString();
+                        const migratedCards = parsedCards.map((oldCard: any) => {
+                            // Convert old card to new SuperMemo 2 format
+                            return {
+                                id: oldCard.id,
+                                front: oldCard.front,
+                                back: oldCard.back,
+                                category: oldCard.category || 'Vocabulário Básico', // Default category if missing
+                                // Reset SRS state, but preserve the card
+                                repetitions: 0,
+                                easinessFactor: 2.5,
+                                interval: 0, // Will be due for review immediately
+                                dueDate: today
+                            };
+                        });
+
+                        localStorage.setItem(newGakuDataKey, JSON.stringify(migratedCards));
+                        // Remove old key to prevent re-migration and conflicts
+                        localStorage.removeItem(oldJpDataKey); 
+                        migrationOccurred = true;
+                        console.log("Successfully migrated cards from `level` to SuperMemo 2 format.");
+                    }
+                } catch (e) {
+                    console.error(`Could not migrate corrupt data from key '${oldJpDataKey}'.`, e);
+                }
+            }
+
+            // --- Previous migration logic for key renaming (keep as fallback) ---
             const keyMap = {
                 'cards': 'gaku-cards',
                 'studyHistory': 'gaku-study-history',
@@ -1402,15 +1443,12 @@ const App = () => {
                 'theme': 'gaku-theme'
             };
 
-            let migrationOccurred = false;
-
             for (const [oldKey, newKey] of Object.entries(keyMap)) {
                 const oldData = localStorage.getItem(oldKey);
                 const newData = localStorage.getItem(newKey);
 
                 if (oldData && !newData) {
                     try {
-                        // Validate JSON before setting to prevent corrupting data
                         JSON.parse(oldData); 
                         localStorage.setItem(newKey, oldData);
                         localStorage.removeItem(oldKey);
@@ -1422,25 +1460,24 @@ const App = () => {
                 }
             }
             
-            // Mark migration as complete so it doesn't run again.
+            // Mark this specific migration as complete.
             localStorage.setItem(migrationKey, 'true');
 
             if (migrationOccurred) {
                  console.log("Data migration complete. Reloading page to apply changes.");
-                 // Force a reload to ensure all state initializers use the migrated data.
                  window.location.reload();
                  return true; // Reloading page
             }
             return false; // No migration, no reload needed
         };
         
-        // This stops the rest of the app from rendering if a reload is about to happen.
         const isReloading = runDataMigration();
         if (isReloading) {
             document.body.style.display = 'none'; // Hide body to prevent flash of old content
         }
 
     }, []); // Empty dependency array ensures it runs only once on mount.
+
 
     // --- STATE MANAGEMENT ---
     const [cards, setCards] = useState<Card[]>(() => {
