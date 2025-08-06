@@ -1,0 +1,6 @@
+{
+  "name": "Gaku APP",
+  "description": "Um aplicativo de flashcards, estilo Anki, para ajudar a estudar japonês.",
+  "requestFramePermissions": [],
+  "prompt": ""
+}
