@@ -523,7 +523,7 @@ const AddCardForm: React.FC<{
     editingCard?: Card | null;
     onDone: () => void;
     onNavigate: (view: View) => void;
-    onNewDeck: (deckName: string) => Promise<boolean>;
+    onNewDeck: (deckName: string, firstCard?: { front: string; back: string }) => Promise<boolean>;
 }> = ({ onAddCard, onEditCard, onDeleteCard, existingCategories, editingCard, onDone, onNavigate, onNewDeck }) => {
     const [front, setFront] = useState('');
     const [back, setBack] = useState('');
@@ -547,8 +547,10 @@ const AddCardForm: React.FC<{
     
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
+        const frontTrimmed = front.trim();
+        const backTrimmed = back.trim();
         const categoryTrimmed = category.trim();
-        if (!front.trim() || !back.trim() || !categoryTrimmed) {
+        if (!frontTrimmed || !backTrimmed || !categoryTrimmed) {
             alert('Por favor, preencha todos os campos.');
             return;
         }
@@ -556,7 +558,7 @@ const AddCardForm: React.FC<{
         const isNewDeck = !existingCategories.some(c => c.toLowerCase() === categoryTrimmed.toLowerCase());
 
         if (isNewDeck) {
-            const uploaded = await onNewDeck(categoryTrimmed);
+            const uploaded = await onNewDeck(categoryTrimmed, { front: frontTrimmed, back: backTrimmed });
             if (!uploaded) return; // Stop if user cancels share or upload fails
         }
         
@@ -564,11 +566,11 @@ const AddCardForm: React.FC<{
         const today = new Date().toISOString();
 
         if (editingCard) {
-            onEditCard({ ...editingCard, front, back, category: categoryTrimmed });
+            onEditCard({ ...editingCard, front: frontTrimmed, back: backTrimmed, category: categoryTrimmed });
         } else {
             onAddCard({
-                front,
-                back,
+                front: frontTrimmed,
+                back: backTrimmed,
                 category: categoryTrimmed,
                 repetitions: 0,
                 easinessFactor: 2.5,
@@ -1802,13 +1804,12 @@ const App = () => {
         setCards(prev => [...prev.filter(c => c.repetitions !== -1), ...cardsToSave, ...placeholderCards]);
     };
 
-    const handleNewDeckFromForm = async (deckName: string): Promise<boolean> => {
+    const handleNewDeckFromForm = async (deckName: string, firstCard?: { front: string; back: string }): Promise<boolean> => {
         setIsLoading(true);
         const existsOnRemote = await communityApi.checkDeckExists(deckName);
         setIsLoading(false);
 
         if (existsOnRemote) {
-            // If it exists remotely, just allow local creation.
             return true;
         }
 
@@ -1819,21 +1820,22 @@ const App = () => {
                 message: (
                     <>
                        <p>Notamos que este baralho é novo. Você gostaria de compartilhá-lo com a comunidade Gaku?</p>
-                       <small>Você ainda precisará adicionar as cartas a ele depois.</small>
+                       <small>{firstCard ? 'A primeira carta será incluída no baralho compartilhado.' : 'Você ainda precisará adicionar as cartas a ele depois.'}</small>
                     </>
                 ),
                 confirmText: 'Sim, compartilhar',
                 cancelText: 'Não, só local',
                 onConfirm: async () => {
+                    const cardsToUpload: PublicCard[] = firstCard ? [{ front: firstCard.front, back: firstCard.back }] : [];
                     const newPublicDeck: PublicDeck = {
                         name: deckName,
-                        cardCount: 0,
+                        cardCount: cardsToUpload.length,
                         description: 'Um novo baralho compartilhado pela comunidade.', // Default description
                         author: 'Anônimo', // Default author
                         downloads: 0,
                     };
                     setIsLoading(true);
-                    const success = await communityApi.uploadDeck(newPublicDeck, []);
+                    const success = await communityApi.uploadDeck(newPublicDeck, cardsToUpload as Card[]);
                     setIsLoading(false);
                     if (success) {
                         alert(`Baralho "${deckName}" compartilhado com sucesso!`);
