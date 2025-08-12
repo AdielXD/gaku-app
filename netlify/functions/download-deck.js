@@ -4,35 +4,39 @@ const { createClient } = require('@supabase/supabase-js');
 exports.handler = async function(event, context) {
   const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
-  // Pega o ID do baralho da URL (ex: /download-deck?id=123)
-  const deckId = event.queryStringParameters.id;
+  // 1. Recebe o NOME do baralho, como o frontend envia.
+  const deckName = event.queryStringParameters.name;
 
-  if (!deckId) {
-    return { statusCode: 400, body: 'ID do baralho não fornecido.' };
+  if (!deckName) {
+    return { statusCode: 400, body: JSON.stringify({ error: 'Nome do baralho não fornecido.' }) };
   }
 
-  // Pega os dados do baralho e todas as cartas associadas a ele
-  const { data: deck, error } = await supabase
-    .from('decks')
-    .select(`
-      id,
-      name,
-      description,
-      author,
-      cards (id, front, back)
-    `)
-    .eq('id', deckId)
-    .single(); // .single() retorna um objeto só, em vez de um array
+  try {
+    // 2. Procura o baralho pelo NOME para obter o seu ID e as suas cartas.
+    const { data: deck, error } = await supabase
+      .from('decks')
+      .select('id, cards (front, back)')
+      .eq('name', deckName)
+      .single();
 
-  if (error) {
-    return { statusCode: 500, body: JSON.stringify(error) };
+    if (error || !deck) {
+      return { statusCode: 404, body: JSON.stringify({ error: 'Baralho não encontrado.' }) };
+    }
+
+    // 3. Usa o ID que encontrámos para incrementar o contador de downloads.
+    //    A sua função 'increment_downloads' no Supabase, que espera um ID, já está correta para isto.
+    await supabase.rpc('increment_downloads', { deck_id_to_increment: deck.id });
+
+    return {
+      statusCode: 200,
+      body: JSON.stringify(deck.cards || [])
+    };
+
+  } catch (error) {
+    console.error(`Erro ao baixar o baralho ${deckName}:`, error);
+    return { 
+      statusCode: 500, 
+      body: JSON.stringify({ error: 'Ocorreu um erro interno ao processar o seu pedido.' }) 
+    };
   }
-  
-  // Incrementa o contador de downloads
-  await supabase.rpc('increment_downloads', { deck_id_to_increment: deckId });
-
-  return {
-    statusCode: 200,
-    body: JSON.stringify(deck)
-  };
 };
