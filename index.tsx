@@ -15,6 +15,7 @@ const CloudUploadIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="24"
 const CloudDownloadIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V12"/><path d="m7 15 5 5 5-5"/><path d="M12 4v16"/></svg>;
 const XIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>;
 const CheckIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6 9 17l-5-5"/></svg>;
+const CheckCircleIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>;
 const StarIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>;
 const BarChartIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" x2="12" y1="20" y2="10"/><line x1="18" x2="18" y1="20" y2="4"/><line x1="6" x2="6" y1="20" y2="16"/></svg>;
 const ArrowLeftIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></svg>;
@@ -28,7 +29,7 @@ const Share2Icon = () => <svg xmlns="http://www.w3.org/2000/svg" width="24" heig
 const ArrowRightLeftIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 17l-4-4 4-4"/><path d="M7 13h10"/><path d="M13 7l4 4-4 4"/></svg>;
 
 
-// --- INTERFACES, TYPES & CONSTANTS ---
+// --- INTERFaces, TYPES & CONSTANTS ---
 interface Card {
   id: number;
   front: string;
@@ -80,9 +81,6 @@ const communityApi = {
       const data = await response.json();
       return data.sort((a: PublicDeck, b: PublicDeck) => b.downloads - a.downloads);
     } catch (error) {
-      // DEV_NOTE: It is safe to ignore 404 errors here during local development.
-      // The backend for the community features will be implemented separately.
-      // The function gracefully returns an empty array to prevent app crashes.
       console.error("Error fetching public decks:", error);
       return [];
     }
@@ -96,7 +94,6 @@ const communityApi = {
         }
         return await response.json();
      } catch (error) {
-        // DEV_NOTE: Safe to ignore 404s during local dev. See getPublicDecks.
         console.error(`Error fetching cards for deck ${deckName}:`, error);
         return [];
      }
@@ -111,29 +108,29 @@ const communityApi = {
         const data = await response.json();
         return data.exists;
     } catch (error) {
-        // DEV_NOTE: Safe to ignore 404s during local dev. See getPublicDecks.
         console.error(`Error checking if deck ${deckName} exists:`, error);
         return true; // Fail safe: assume it exists to prevent accidental uploads.
     }
   },
 
-  uploadDeck: async (deck: PublicDeck, cards: Card[]): Promise<boolean> => {
+  uploadDeck: async (deckData: Omit<PublicDeck, 'cardCount' | 'downloads'>, cards: Card[]): Promise<{success: boolean, message?: string}> => {
      try {
         const response = await fetch('/.netlify/functions/upload-deck', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ deck, cards: cards.map(c => ({ front: c.front, back: c.back })) }),
+            body: JSON.stringify({ 
+                deck: deckData, 
+                cards: cards.map(c => ({ front: c.front, back: c.back })) 
+            }),
         });
         if (!response.ok) {
-            const errorBody = await response.text();
-            console.error("Upload failed with status:", response.status, "Body:", errorBody);
-            throw new Error(`HTTP error! status: ${response.status}`);
+            const errorBody = await response.json();
+            throw new Error(errorBody.error || `HTTP error! status: ${response.status}`);
         }
-        return true;
-     } catch (error) {
-        // DEV_NOTE: Safe to ignore 404s during local dev. See getPublicDecks.
+        return { success: true };
+     } catch (error: any) {
         console.error("Error uploading deck:", error);
-        return false;
+        return { success: false, message: error.message };
      }
   },
 };
@@ -281,9 +278,9 @@ const getInitialCards = (): Card[] => {
 };
 
 // --- UI COMPONENTS ---
-const Loader: React.FC = () => (
-    <div className="loader-overlay">
-        <div className="loader"></div>
+const Loader: React.FC<{ isSmall?: boolean }> = ({ isSmall = false }) => (
+    <div className={isSmall ? '' : "loader-overlay"}>
+        <div className={`loader ${isSmall ? 'small' : ''}`}></div>
     </div>
 );
 
@@ -523,8 +520,7 @@ const AddCardForm: React.FC<{
     editingCard?: Card | null;
     onDone: () => void;
     onNavigate: (view: View) => void;
-    onNewDeck: (deckName: string, firstCard?: { front: string; back: string }) => Promise<boolean>;
-}> = ({ onAddCard, onEditCard, onDeleteCard, existingCategories, editingCard, onDone, onNavigate, onNewDeck }) => {
+}> = ({ onAddCard, onEditCard, onDeleteCard, existingCategories, editingCard, onDone, onNavigate }) => {
     const [front, setFront] = useState('');
     const [back, setBack] = useState('');
     const [category, setCategory] = useState('');
@@ -547,30 +543,21 @@ const AddCardForm: React.FC<{
     
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
-        const frontTrimmed = front.trim();
-        const backTrimmed = back.trim();
         const categoryTrimmed = category.trim();
-        if (!frontTrimmed || !backTrimmed || !categoryTrimmed) {
+        if (!front.trim() || !back.trim() || !categoryTrimmed) {
             alert('Por favor, preencha todos os campos.');
             return;
-        }
-
-        const isNewDeck = !existingCategories.some(c => c.toLowerCase() === categoryTrimmed.toLowerCase());
-
-        if (isNewDeck) {
-            const uploaded = await onNewDeck(categoryTrimmed, { front: frontTrimmed, back: backTrimmed });
-            if (!uploaded) return; // Stop if user cancels share or upload fails
         }
         
         sessionStorage.setItem('gaku-last-category', categoryTrimmed);
         const today = new Date().toISOString();
 
         if (editingCard) {
-            onEditCard({ ...editingCard, front: frontTrimmed, back: backTrimmed, category: categoryTrimmed });
+            onEditCard({ ...editingCard, front, back, category: categoryTrimmed });
         } else {
             onAddCard({
-                front: frontTrimmed,
-                back: backTrimmed,
+                front,
+                back,
                 category: categoryTrimmed,
                 repetitions: 0,
                 easinessFactor: 2.5,
@@ -760,7 +747,8 @@ const DeckList: React.FC<{
     onDeleteDeck: (deckName: string) => void;
     onAddNewDeck: () => void;
     onExportDeck: (deckName: string) => void;
-}> = ({ decks, onSelectDeck, onRenameDeck, onDeleteDeck, onAddNewDeck, onExportDeck }) => {
+    onShareDeck: (deckName: string) => void;
+}> = ({ decks, onSelectDeck, onRenameDeck, onDeleteDeck, onAddNewDeck, onExportDeck, onShareDeck }) => {
     
     if (decks.length === 0) {
         return (
@@ -794,6 +782,14 @@ const DeckList: React.FC<{
                             <ArrowRightIcon/>
                         </button>
                         <div className="deck-item-actions">
+                             <button 
+                                onClick={() => onShareDeck(name)} 
+                                className="deck-action-btn share" 
+                                title="Compartilhar com a Comunidade"
+                                disabled={count === 0}
+                            >
+                                <Share2Icon/>
+                            </button>
                              <button 
                                 onClick={() => onExportDeck(name)} 
                                 className="deck-action-btn" 
@@ -1297,9 +1293,10 @@ const PracticeView: React.FC<{
 };
 
 const CommunityView: React.FC<{
-    onDownloadDeck: (deckName: string, cards: PublicCard[]) => void;
-    localDecks: DeckInfo[];
-}> = ({ onDownloadDeck, localDecks }) => {
+    onDownloadDeck: (deck: PublicDeck, cards: PublicCard[]) => void;
+    localDeckNames: Set<string>;
+    onNavigate: (view: View) => void;
+}> = ({ onDownloadDeck, localDeckNames, onNavigate }) => {
     const [publicDecks, setPublicDecks] = useState<PublicDeck[]>([]);
     const [loading, setLoading] = useState(true);
     const [downloading, setDownloading] = useState<string | null>(null);
@@ -1325,7 +1322,18 @@ const CommunityView: React.FC<{
             return;
         }
 
-        const localDeckExists = localDecks.some(d => d.name.toLowerCase() === deck.name.toLowerCase());
+        const handleConfirmDownload = () => {
+            onDownloadDeck(deck, cards);
+            setPublicDecks(prevDecks =>
+                prevDecks.map(d =>
+                    d.name === deck.name
+                        ? { ...d, downloads: (d.downloads || 0) + 1 }
+                        : d
+                )
+            );
+        };
+
+        const localDeckExists = localDeckNames.has(deck.name.toLowerCase());
         
         if (localDeckExists) {
              setModalConfig({
@@ -1333,10 +1341,10 @@ const CommunityView: React.FC<{
                 title: 'Baralho já existe',
                 message: `Você já tem um baralho chamado "${deck.name}". Baixar este baralho irá adicionar as cartas da comunidade a ele. As cartas duplicadas serão ignoradas. Deseja continuar?`,
                 confirmText: 'Continuar',
-                onConfirm: () => onDownloadDeck(deck.name, cards),
+                onConfirm: handleConfirmDownload,
             });
         } else {
-            onDownloadDeck(deck.name, cards);
+            handleConfirmDownload();
         }
     };
 
@@ -1347,43 +1355,125 @@ const CommunityView: React.FC<{
             </div>
 
             {loading ? <Loader /> : (
-                publicDecks.length > 0 ? (
-                    <ul className="deck-list">
-                        {publicDecks.map((deck) => (
-                            <li key={deck.name} className="deck-list-item">
-                                <div className="deck-item-main" style={{ cursor: 'default', flexDirection: 'column', alignItems: 'flex-start', gap: '8px' }}>
-                                    <div style={{width: '100%', display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
-                                        <div className="deck-name">{deck.name}</div>
-                                        <div className="deck-card-count">{deck.cardCount} cartas</div>
+                <>
+                    {publicDecks.length > 0 ? (
+                        <ul className="deck-list">
+                            {publicDecks.map((deck) => {
+                                const isOwned = localDeckNames.has(deck.name.toLowerCase());
+                                return (
+                                <li key={deck.id || deck.name} className="deck-list-item">
+                                    <div className="deck-item-main" style={{ cursor: 'default', flexDirection: 'column', alignItems: 'flex-start', gap: '8px' }}>
+                                        <div style={{width: '100%', display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
+                                            <div className="deck-name">{deck.name}</div>
+                                            <div className="deck-card-count">{deck.cardCount} cartas</div>
+                                        </div>
+                                        <div className="deck-card-count" style={{ fontStyle: 'italic', paddingRight: '20px' }}>{deck.description || 'Sem descrição.'}</div>
+                                        <div className="deck-metadata">
+                                            <span>Por: <strong>{deck.author || 'Anônimo'}</strong></span>
+                                            <span className="download-count"><DownloadIcon/> {deck.downloads || 0}</span>
+                                        </div>
                                     </div>
-                                    <div className="deck-card-count" style={{ fontStyle: 'italic', paddingRight: '20px' }}>{deck.description}</div>
-                                     <div className="deck-card-count" style={{ alignSelf: 'flex-end', fontWeight: 'bold' }}>Por: {deck.author}</div>
-                                </div>
-                                <div className="deck-item-actions">
-                                    <button 
-                                        onClick={() => handleDownload(deck)} 
-                                        className="deck-action-btn" 
-                                        title={`Baixar ${deck.name}`}
-                                        disabled={downloading !== null}
-                                    >
-                                        {downloading === deck.name ? <Loader/> : <DownloadIcon/>}
-                                    </button>
-                                </div>
-                            </li>
-                        ))}
-                    </ul>
-                ) : (
-                    <div className="empty-state-container">
-                        <GlobeIcon />
-                        <h3>A comunidade está vazia</h3>
-                        <p>Ainda não há baralhos compartilhados. Seja o primeiro a compartilhar um!</p>
-                    </div>
-                )
+                                    <div className="deck-item-actions">
+                                        {isOwned ? (
+                                             <button className="deck-action-btn owned" title="Você já possui este baralho" disabled>
+                                                <CheckCircleIcon/>
+                                            </button>
+                                        ) : (
+                                            <button 
+                                                onClick={() => handleDownload(deck)} 
+                                                className="deck-action-btn download" 
+                                                title={`Baixar ${deck.name}`}
+                                                disabled={downloading !== null}
+                                            >
+                                                {downloading === deck.name ? <Loader isSmall={true} /> : <CloudDownloadIcon/>}
+                                            </button>
+                                        )}
+                                    </div>
+                                </li>
+                            )})}
+                        </ul>
+                    ) : (
+                        <div className="empty-state-container">
+                            <GlobeIcon />
+                            <h3>A comunidade está vazia</h3>
+                            <p>Ainda não há baralhos compartilhados. Que tal ser o primeiro?</p>
+                            <button className="btn btn-outline" onClick={() => onNavigate('decks')}>
+                                <Share2Icon/> Compartilhar um baralho
+                            </button>
+                        </div>
+                    )}
+                     {publicDecks.length > 0 && (
+                        <div className="community-footer">
+                            <p>Viu um baralho que gostou? Baixe-o! Ou <button className="btn-link" onClick={() => onNavigate('decks')}>compartilhe um dos seus</button> para ajudar a comunidade.</p>
+                        </div>
+                     )}
+                </>
             )}
             {modalConfig && <CustomDialog {...modalConfig} onDismiss={() => setModalConfig(null)} />}
         </div>
     );
 };
+
+const ShareDeckModal: React.FC<{
+    deckName: string;
+    onConfirm: (description: string, author: string) => void;
+    onCancel: () => void;
+    isLoading: boolean;
+}> = ({ deckName, onConfirm, onCancel, isLoading }) => {
+    const [description, setDescription] = useState('');
+    const [author, setAuthor] = useState(localStorage.getItem('gaku-author-name') || '');
+
+    const handleConfirm = () => {
+        if (!author.trim()) {
+            alert("Por favor, insira seu nome de autor.");
+            return;
+        }
+        localStorage.setItem('gaku-author-name', author.trim());
+        onConfirm(description.trim(), author.trim());
+    };
+
+    return (
+        <div className="modal-overlay" onClick={onCancel}>
+            <div className="custom-dialog-content" onClick={(e) => e.stopPropagation()}>
+                <h3>Compartilhar "{deckName}"</h3>
+                <p>Adicione alguns detalhes para ajudar outros usuários a encontrar seu baralho.</p>
+                <div className="form-group">
+                    <label htmlFor="share-author">Seu Nome (Autor)</label>
+                    <input
+                        id="share-author"
+                        type="text"
+                        value={author}
+                        onChange={(e) => setAuthor(e.target.value)}
+                        placeholder="Ex: Hideo"
+                        maxLength={50}
+                        required
+                        autoFocus
+                    />
+                </div>
+                <div className="form-group">
+                    <label htmlFor="share-description">Descrição (Opcional)</label>
+                    <textarea
+                        id="share-description"
+                        value={description}
+                        onChange={(e) => setDescription(e.target.value)}
+                        placeholder="Ex: Vocabulário essencial do JLPT N5, kanji, etc."
+                        rows={3}
+                        maxLength={200}
+                    />
+                </div>
+                <div className="dialog-actions">
+                    <button onClick={onCancel} className="btn btn-cancel" disabled={isLoading}>
+                        Cancelar
+                    </button>
+                    <button onClick={handleConfirm} className="btn" disabled={!author.trim() || isLoading}>
+                        {isLoading ? <Loader isSmall={true} /> : 'Confirmar e Compartilhar'}
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
 
 // --- MAIN APP COMPONENT ---
 const App = () => {
@@ -1513,6 +1603,7 @@ const App = () => {
     const [practiceDeck, setPracticeDeck] = useState<string | null>(null);
     const [feedbackState, setFeedbackState] = useState('');
     const [modalConfig, setModalConfig] = useState<ModalConfig | null>(null);
+    const [deckToShare, setDeckToShare] = useState<string | null>(null);
     const [notificationPermission, setNotificationPermission] = useState<NotificationPermissionStatus>('default');
     const [isLoading, setIsLoading] = useState(false);
     const [reviewQueue, setReviewQueue] = useState<Card[]>([]);
@@ -1576,6 +1667,7 @@ const App = () => {
             .sort((a, b) => a.name.localeCompare(b.name));
     }, [cards]);
     
+    const localDeckNamesSet = useMemo(() => new Set(allDecks.map(d => d.name.toLowerCase())), [allDecks]);
     const existingCategories = useMemo(() => allDecks.map(d => d.name), [allDecks]);
     
     const cardsInSelectedDeck = useMemo(() => {
@@ -1804,52 +1896,6 @@ const App = () => {
         setCards(prev => [...prev.filter(c => c.repetitions !== -1), ...cardsToSave, ...placeholderCards]);
     };
 
-    const handleNewDeckFromForm = async (deckName: string, firstCard?: { front: string; back: string }): Promise<boolean> => {
-        setIsLoading(true);
-        const existsOnRemote = await communityApi.checkDeckExists(deckName);
-        setIsLoading(false);
-
-        if (existsOnRemote) {
-            return true;
-        }
-
-        return new Promise((resolve) => {
-            setModalConfig({
-                type: 'confirm',
-                title: 'Compartilhar Novo Baralho?',
-                message: (
-                    <>
-                       <p>Notamos que este baralho é novo. Você gostaria de compartilhá-lo com a comunidade Gaku?</p>
-                       <small>{firstCard ? 'A primeira carta será incluída no baralho compartilhado.' : 'Você ainda precisará adicionar as cartas a ele depois.'}</small>
-                    </>
-                ),
-                confirmText: 'Sim, compartilhar',
-                cancelText: 'Não, só local',
-                onConfirm: async () => {
-                    const cardsToUpload: PublicCard[] = firstCard ? [{ front: firstCard.front, back: firstCard.back }] : [];
-                    const newPublicDeck: PublicDeck = {
-                        name: deckName,
-                        cardCount: cardsToUpload.length,
-                        description: 'Um novo baralho compartilhado pela comunidade.', // Default description
-                        author: 'Anônimo', // Default author
-                        downloads: 0,
-                    };
-                    setIsLoading(true);
-                    const success = await communityApi.uploadDeck(newPublicDeck, cardsToUpload as Card[]);
-                    setIsLoading(false);
-                    if (success) {
-                        alert(`Baralho "${deckName}" compartilhado com sucesso!`);
-                        resolve(true);
-                    } else {
-                        alert(`Falha ao compartilhar o baralho. Ele será criado apenas localmente.`);
-                        resolve(true); // Still allow local creation even if remote fails
-                    }
-                },
-                onCancel: () => resolve(true), // User chose not to share, proceed with local creation.
-            });
-        });
-    };
-
     const handleEditCard = (card: Card) => {
         setEditingCard(card);
         setView('add');
@@ -1925,18 +1971,11 @@ const App = () => {
             title: 'Criar Novo Baralho',
             message: 'Digite o nome para o seu novo baralho.',
             confirmText: 'Criar',
-            onConfirm: async (deckName) => {
+            onConfirm: (deckName) => {
                 if (deckName) {
                     if (existingCategories.some(c => c.toLowerCase() === deckName.trim().toLowerCase())) {
                         alert(`Um baralho chamado "${deckName}" já existe.`);
                         return;
-                    }
-
-                    const isNewDeck = !existingCategories.some(c => c.toLowerCase() === deckName.trim().toLowerCase());
-
-                    if (isNewDeck) {
-                        const uploaded = await handleNewDeckFromForm(deckName.trim());
-                        if (!uploaded) return; 
                     }
                     
                     // Add a placeholder to make the deck appear, even if empty
@@ -1950,10 +1989,42 @@ const App = () => {
                     
                     setCards(prev => [...prev, cardToSave]);
                     setSelectedDeck(deckName.trim());
+                    setView('decks');
                 }
             },
         });
     };
+
+    const handleShareDeck = (deckName: string) => {
+        setDeckToShare(deckName);
+    };
+
+    const handleConfirmShare = async (description: string, author: string) => {
+        if (!deckToShare) return;
+
+        setIsLoading(true);
+        const remoteExists = await communityApi.checkDeckExists(deckToShare);
+        if (remoteExists) {
+            setIsLoading(false);
+            alert(`Um baralho com o nome "${deckToShare}" já foi compartilhado na comunidade. Por favor, renomeie o seu baralho se quiser compartilhá-lo.`);
+            setDeckToShare(null);
+            return;
+        }
+
+        const cardsToShare = cards.filter(c => c.category === deckToShare && c.repetitions !== -1);
+        const deckData = { name: deckToShare, description, author };
+
+        const result = await communityApi.uploadDeck(deckData, cardsToShare);
+        setIsLoading(false);
+        setDeckToShare(null);
+
+        if (result.success) {
+            alert(`Baralho "${deckToShare}" compartilhado com a comunidade com sucesso!`);
+        } else {
+            alert(`Falha ao compartilhar o baralho: ${result.message || 'Erro desconhecido.'}`);
+        }
+    };
+
 
     const handleSettingsChange = (newSettings: Partial<ReviewSettings>) => {
         setReviewSettings(prev => {
@@ -2103,12 +2174,12 @@ const App = () => {
     };
 
 
-    const handleDownloadDeck = (deckName: string, communityCards: PublicCard[]) => {
+    const handleImportCommunityDeck = (deck: PublicDeck, communityCards: PublicCard[]) => {
         let maxId = cards.length > 0 ? Math.max(...cards.map(c => c.id)) : 0;
         const today = new Date().toISOString();
         const initialSrsState = { repetitions: 0, easinessFactor: 2.5, interval: 0, dueDate: today };
 
-        const localCardsInDeck = cards.filter(c => c.category.toLowerCase() === deckName.toLowerCase());
+        const localCardsInDeck = cards.filter(c => c.category.toLowerCase() === deck.name.toLowerCase());
         
         const newCardsToAdd = communityCards.filter(communityCard => 
             !localCardsInDeck.some(localCard => localCard.front.toLowerCase() === communityCard.front.toLowerCase())
@@ -2119,24 +2190,24 @@ const App = () => {
                 id: maxId,
                 front: communityCard.front,
                 back: communityCard.back,
-                category: deckName,
+                category: deck.name, // Use the original casing
             };
         });
 
         if (newCardsToAdd.length > 0) {
             setCards(prev => [...prev.filter(c => c.repetitions !== -1), ...newCardsToAdd]);
-            alert(`${newCardsToAdd.length} nova(s) carta(s) adicionada(s) ao baralho "${deckName}"!`);
+            alert(`${newCardsToAdd.length} nova(s) carta(s) adicionada(s) ao baralho "${deck.name}"!`);
         } else {
-            alert(`O baralho "${deckName}" já está atualizado com todas as cartas da comunidade.`);
+            alert(`O baralho "${deck.name}" já está atualizado com todas as cartas da comunidade.`);
         }
         setView('decks');
-        setSelectedDeck(deckName);
+        setSelectedDeck(deck.name);
     };
 
     const toggleTheme = () => setTheme(prev => prev === 'light' ? 'dark' : 'light');
 
     const renderContent = () => {
-        if (isLoading) return <Loader />;
+        if (isLoading && !deckToShare) return <Loader />; // Full screen loader, except for share modal
         if (isOnboarding) return null; // Tour handles its own UI
         
         if (practiceDeck) {
@@ -2152,7 +2223,6 @@ const App = () => {
                 editingCard={editingCard}
                 onDone={() => { setEditingCard(null); setView('decks'); }}
                 onNavigate={handleNavigate}
-                onNewDeck={handleNewDeckFromForm}
             />;
         }
 
@@ -2182,6 +2252,7 @@ const App = () => {
                 onDeleteDeck={handleDeleteDeck}
                 onAddNewDeck={handleAddNewDeck}
                 onExportDeck={handleExportDeck}
+                onShareDeck={handleShareDeck}
             />;
         }
 
@@ -2202,7 +2273,7 @@ const App = () => {
         }
 
         if (view === 'community') {
-            return <CommunityView onDownloadDeck={handleDownloadDeck} localDecks={allDecks} />;
+            return <CommunityView onDownloadDeck={handleImportCommunityDeck} localDeckNames={localDeckNamesSet} onNavigate={handleNavigate} />;
         }
 
         // --- Review View Logic ---
@@ -2417,6 +2488,17 @@ const App = () => {
                  <NavBar currentView={view} onNavigate={handleNavigate} reviewCount={dueCards.length} />
             </div>
              {modalConfig && <CustomDialog {...modalConfig} onDismiss={() => setModalConfig(null)} />}
+             {deckToShare && (
+                <ShareDeckModal 
+                    deckName={deckToShare}
+                    onConfirm={handleConfirmShare}
+                    onCancel={() => {
+                        setDeckToShare(null);
+                        setIsLoading(false);
+                    }}
+                    isLoading={isLoading}
+                />
+             )}
              <OnboardingTour />
         </>
     );

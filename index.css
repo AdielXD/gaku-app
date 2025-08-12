@@ -1,3 +1,4 @@
+
 :root {
   /* WhatsApp Light Theme Palette */
   --primary-color: #008069; /* Darker green for titles, active icons */
@@ -395,6 +396,9 @@ html[data-theme="dark"] .flashcard-face > div.has-scroll-indicator {
   background-color: var(--background-color);
   color: var(--primary-color);
 }
+.deck-action-btn.share:hover:not(:disabled) {
+  color: var(--srs-green);
+}
 .deck-action-btn.delete:hover:not(:disabled) {
   color: var(--srs-red);
 }
@@ -405,6 +409,43 @@ html[data-theme="dark"] .flashcard-face > div.has-scroll-indicator {
 .deck-action-btn svg {
   width: 20px;
   height: 20px;
+}
+
+.deck-action-btn.download:hover:not(:disabled) {
+  color: var(--srs-blue);
+}
+
+.deck-action-btn.owned {
+  color: var(--srs-green);
+  cursor: default;
+}
+
+.deck-metadata {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    width: 100%;
+    font-size: 0.9rem;
+    color: var(--secondary-text-color);
+}
+.download-count {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+.download-count svg {
+    width: 16px;
+    height: 16px;
+}
+
+.community-footer {
+    text-align: center;
+    padding: 20px;
+    margin-top: 16px;
+    font-size: 0.95rem;
+    color: var(--secondary-text-color);
+    background-color: var(--card-background-color);
+    border-radius: var(--border-radius);
 }
 
 /* --- Deck Card List View --- */
@@ -765,7 +806,7 @@ html[data-theme="dark"] .flashcard-face > div.has-scroll-indicator {
   color: var(--secondary-text-color);
   line-height: 1.5;
 }
-.custom-dialog-content input, .dialog-select {
+.custom-dialog-content input, .custom-dialog-content textarea, .dialog-select {
   width: 100%;
   padding: 12px;
   border: 1px solid var(--input-border-color);
@@ -1230,6 +1271,15 @@ html[data-theme="dark"] .loader-overlay {
     box-sizing: border-box;
     animation: rotation 1s linear infinite;
 }
+.loader.small {
+    width: 24px;
+    height: 24px;
+    border-width: 3px;
+    color: white; /* For buttons */
+    border-color: currentColor;
+    border-bottom-color: transparent;
+}
+
 @keyframes rotation {
     0% { transform: rotate(0deg); }
     100% { transform: rotate(360deg); }
