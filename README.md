@@ -2,4 +2,4 @@
 
 Meu app pessoal de revisão 
 
-online on gaku-app.netlify.com
+online on https://gaku-app.netlify.app/
