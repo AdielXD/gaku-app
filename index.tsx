@@ -1,4 +1,5 @@
 
+
 import React, { useState, useMemo, useEffect, useRef, useLayoutEffect, useCallback } from 'react';
 import { createRoot } from 'react-dom/client';
 
@@ -27,6 +28,10 @@ const GlobeIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="24" heigh
 const DownloadIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>;
 const Share2Icon = () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/></svg>;
 const ArrowRightLeftIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 17l-4-4 4-4"/><path d="M7 13h10"/><path d="M13 7l4 4-4 4"/></svg>;
+const BellIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>;
+const FlameIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/></svg>;
+const ZapIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>;
+const HelpCircleIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg>;
 
 
 // --- INTERFaces, TYPES & CONSTANTS ---
@@ -50,6 +55,14 @@ interface StudyDay { date: string; reviewed: number; correct: number; }
 interface PublicDeck { id?: number; name: string; cardCount: number; description: string; author: string; downloads: number; }
 type PublicCard = Omit<Card, 'id' | 'category' | 'repetitions' | 'easinessFactor' | 'interval' | 'dueDate'>;
 
+interface UserProfile {
+    streak: number;
+    lastStudiedDate: string | null; // ISO date string 'YYYY-MM-DD'
+    dailyGoal: number; // XP
+    dailyXp: number;
+    dailyGoalMetDate: string | null; // To track if goal met today
+    reminderTime: string; // "HH:MM" format
+}
 
 interface ReviewSettings {
   order: 'default' | 'random' | 'newestFirst';
@@ -67,6 +80,18 @@ interface ModalConfig {
   onCancel?: () => void;
   initialValue?: string;
 }
+
+const XP_MAP = {
+    // Review feedback
+    again: 0,
+    good: 10,
+    easy: 15,
+    // Actions
+    addCard: 5,
+    newDeck: 20,
+    uploadDeck: 50,
+    downloadDeck: 25,
+};
 
 // --- COMMUNITY BACKEND API ---
 // This will make calls to your Netlify Functions, which will in turn
@@ -192,39 +217,77 @@ const requestNotificationPermission = async (): Promise<NotificationPermissionSt
     return await Notification.requestPermission();
 };
 
-const scheduleNotification = () => {
+const manageNotifications = (profile: UserProfile, streak: number) => {
     if (!('Notification' in window) || Notification.permission !== 'granted' || !('serviceWorker' in navigator)) {
         return;
     }
-    
+
     navigator.serviceWorker.ready.then(registration => {
-        const tomorrow = new Date();
-        tomorrow.setDate(tomorrow.getDate() + 1);
-        tomorrow.setHours(10, 0, 0, 0); // 10 AM tomorrow
+        // Always cancel previous notifications to avoid duplicates
+        registration.active?.postMessage({ type: 'CANCEL_NOTIFICATIONS' });
+
+        const now = new Date();
+        const todayStr = now.toISOString().split('T')[0];
         
-        const delay = tomorrow.getTime() - Date.now();
+        // --- Logic to schedule next notification ---
+        let title: string;
+        let body: string;
+        const targetTime = new Date();
+
+        // Has the user studied today?
+        const hasStudiedToday = profile.lastStudiedDate === todayStr;
+
+        if (hasStudiedToday) {
+            // Studied today, schedule for tomorrow
+            const [hours, minutes] = profile.reminderTime.split(':').map(Number);
+            targetTime.setDate(now.getDate() + 1);
+            targetTime.setHours(hours, minutes, 0, 0);
+
+            title = 'Continue sua ofensiva! 🔥';
+            body = `Você está em uma ofensiva de ${streak} dia(s). Não pare agora!`;
+            
+        } else {
+            // Not studied today. Is streak in danger?
+            const eveningTime = new Date();
+            eveningTime.setHours(21, 0, 0, 0); // 9 PM
+
+            if (now < eveningTime) {
+                // It's not evening yet, schedule a "streak danger" notification for the evening
+                targetTime.setHours(21, 0, 0, 0);
+                 title = 'Sua ofensiva está em perigo! 😨';
+                 body = `Pratique hoje para manter sua ofensiva de ${streak} dia(s) viva. O Gaku coruja acredita em você!`;
+            } else {
+                // It's already past the danger notification time. Schedule for tomorrow.
+                const [hours, minutes] = profile.reminderTime.split(':').map(Number);
+                targetTime.setDate(now.getDate() + 1);
+                targetTime.setHours(hours, minutes, 0, 0);
+
+                title = 'Hora de voltar a estudar! 🚀';
+                body = `Comece uma nova ofensiva hoje. Você consegue!`;
+            }
+        }
+        
+        const delay = targetTime.getTime() - now.getTime();
         
         if (delay > 0 && registration.active) {
             registration.active.postMessage({
                 type: 'SCHEDULE_NOTIFICATION',
                 payload: {
                     delay,
-                    title: 'Hora de estudar Japonês!',
+                    title,
                     options: {
-                        body: 'Suas cartas estão esperando por você. 頑張って!',
+                        body,
                         lang: 'pt-BR',
                         icon: '/icon.svg',
                         badge: '/icon.svg',
                         vibrate: [100, 50, 100],
                         tag: 'gaku-study-reminder',
                         requireInteraction: true,
-                        actions: [
-                            { action: 'open_app', title: 'Abrir App' }
-                        ]
+                        actions: [{ action: 'open_app', title: 'Abrir App' }]
                     }
                 }
             });
-            console.log(`Notification scheduled via Service Worker for ${tomorrow}`);
+            console.log(`Notification scheduled via Service Worker for ${targetTime}`);
         }
     });
 };
@@ -295,6 +358,47 @@ const StatsButton: React.FC<{ onClick: () => void }> = ({ onClick }) => (
         <BarChartIcon />
     </button>
 );
+
+const XpGainToast: React.FC<{ amount: number }> = ({ amount }) => (
+    <div className="xp-toast-container">
+        <div className="xp-toast-content">
+            +{amount} XP
+        </div>
+    </div>
+);
+
+const Header: React.FC<{
+    profile: UserProfile;
+    onStatsClick: () => void;
+    theme: Theme;
+    toggleTheme: () => void;
+}> = ({ profile, onStatsClick, theme, toggleTheme }) => {
+    const { streak, dailyXp, dailyGoal } = profile;
+    const xpProgress = dailyGoal > 0 ? (dailyXp / dailyGoal) * 100 : 0;
+
+    return (
+        <header>
+            <div className="header-main">
+                <h1>Gaku</h1>
+                <div className="header-gamification">
+                    <div className="streak-display" title={`Sua ofensiva atual é de ${streak} dias`}>
+                        <FlameIcon />
+                        <span>{streak}</span>
+                    </div>
+                </div>
+            </div>
+            <div className="header-side">
+                 <div className="daily-goal-progress" title={`Meta diária: ${dailyXp} / ${dailyGoal} XP`}>
+                    <div className="daily-goal-bar" style={{ width: `${Math.min(xpProgress, 100)}%` }}></div>
+                    <ZapIcon />
+                    <span>{dailyXp}/{dailyGoal}</span>
+                </div>
+                <StatsButton onClick={onStatsClick} />
+                <DarkModeToggle theme={theme} toggleTheme={toggleTheme} />
+            </div>
+        </header>
+    );
+};
 
 const NavBar: React.FC<{
     currentView: View;
@@ -460,6 +564,7 @@ const Flashcard: React.FC<{
 
     return (
         <div 
+            id="flashcard-container"
             className={`flashcard-container ${feedbackState}`}
             onTouchStart={handleTouchStart}
             onTouchMove={handleTouchMove}
@@ -496,13 +601,13 @@ const Controls: React.FC<{
         <div className="controls">
             <div className="progress">{progressText}</div>
             {isFlipped ? (
-                <div className="srs-buttons">
+                <div id="srs-buttons-container" className="srs-buttons">
                     <button onClick={() => onFeedback('again')} className="btn srs-btn srs-again">Errei</button>
-                    <button onClick={() => onFeedback('good')} className="btn srs-btn srs-good">OK</button>
-                    <button onClick={() => onFeedback('easy')} className="btn srs-btn srs-easy">Fácil</button>
+                    <button onClick={() => onFeedback('good')} className="btn srs-btn srs-good">OK (+{XP_MAP.good} XP)</button>
+                    <button onClick={() => onFeedback('easy')} className="btn srs-btn srs-easy">Fácil (+{XP_MAP.easy} XP)</button>
                 </div>
             ) : (
-                <button onClick={onShowAnswer} className="btn">Mostrar Resposta</button>
+                <button id="show-answer-btn" onClick={onShowAnswer} className="btn">Mostrar Resposta</button>
             )}
         </div>
     );
@@ -691,7 +796,7 @@ const AddCardForm: React.FC<{
                     </datalist>
                 </div>
                 <button type="submit" className="btn">
-                    {editingCard ? 'Salvar Alterações' : 'Adicionar Carta'}
+                    {editingCard ? 'Salvar Alterações' : `Adicionar Carta (+${XP_MAP.addCard} XP)`}
                 </button>
                 {editingCard && onDeleteCard && (
                     <button type="button" onClick={handleDelete} className="btn-delete">
@@ -816,7 +921,7 @@ const DeckList: React.FC<{
                 <h3>Nenhum baralho encontrado</h3>
                 <p>Crie seu primeiro baralho para começar a adicionar cartas e estudar.</p>
                 <button className="btn" onClick={onAddNewDeck}>
-                    <PlusIcon /> Criar Baralho
+                    <PlusIcon /> Criar Baralho (+{XP_MAP.newDeck} XP)
                 </button>
             </div>
         )
@@ -844,7 +949,7 @@ const DeckList: React.FC<{
                              <button 
                                 onClick={() => onShareDeck(name)} 
                                 className="deck-action-btn share" 
-                                title="Compartilhar com a Comunidade"
+                                title={`Compartilhar com a Comunidade (+${XP_MAP.uploadDeck} XP)`}
                                 disabled={count === 0}
                             >
                                 <Share2Icon/>
@@ -953,7 +1058,7 @@ const CategorySelection: React.FC<{
     </div>
 );
 
-const SessionComplete: React.FC<{ onAddMore: () => void; onGoToDecks: () => void }> = ({ onAddMore, onGoToDecks }) => {
+const SessionComplete: React.FC<{ onAddMore: () => void; onGoToDecks: () => void; streak: number; }> = ({ onAddMore, onGoToDecks, streak }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
   
     useEffect(() => {
@@ -1055,6 +1160,7 @@ const SessionComplete: React.FC<{ onAddMore: () => void; onGoToDecks: () => void
             </div>
             <h2>Parabéns!</h2>
             <p>Você revisou todas as cartas por hoje.</p>
+            {streak > 1 && <p className="streak-message">Sua ofensiva agora é de <strong>{streak} dias</strong>! 🔥</p>}
             <div className="session-complete-actions">
                 <button className="btn" onClick={onGoToDecks}>
                    <ListIcon/> Ver Baralhos
@@ -1073,25 +1179,36 @@ const WelcomeEmptyState: React.FC<{ onAddNewDeck: () => void }> = ({ onAddNewDec
         <h3>Bem-vindo ao Gaku!</h3>
         <p>Parece que você ainda não tem nenhum baralho. Crie o seu primeiro para começar a adicionar cartas e revisar.</p>
         <button className="btn" onClick={onAddNewDeck}>
-            <PlusIcon /> Criar Meu Primeiro Baralho
+            <PlusIcon /> Criar Meu Primeiro Baralho (+{XP_MAP.newDeck} XP)
         </button>
     </div>
 );
 
 const SettingsView: React.FC<{
-    settings: { review: ReviewSettings };
-    onSettingsChange: (newSettings: Partial<ReviewSettings>) => void;
+    settings: { review: ReviewSettings, profile: UserProfile };
+    onReviewSettingsChange: (newSettings: Partial<ReviewSettings>) => void;
+    onProfileChange: (newProfile: Partial<UserProfile>) => void;
     onBackup: () => string;
     onRestore: (data: string) => void;
     onExportJson: () => void;
     onExportCsv: () => void;
     onImport: (file: File) => void;
-}> = ({ settings, onSettingsChange, onBackup, onRestore, onExportJson, onExportCsv, onImport }) => {
+    notificationPermission: NotificationPermissionStatus;
+    onRequestPermission: () => void;
+    onStartReviewTutorial: () => void;
+}> = ({ settings, onReviewSettingsChange, onProfileChange, onBackup, onRestore, onExportJson, onExportCsv, onImport, notificationPermission, onRequestPermission, onStartReviewTutorial }) => {
     const [backupData, setBackupData] = useState('');
     const [restoreData, setRestoreData] = useState('');
     const [showCode, setShowCode] = useState(false);
     const restoreInputRef = useRef<HTMLTextAreaElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
+
+    const permissionStatusText: Record<NotificationPermissionStatus, string> = {
+        default: 'Pendente',
+        granted: 'Permitido',
+        denied: 'Bloqueado',
+        unsupported: 'Não suportado'
+    };
 
     const handleBackup = () => {
         const data = onBackup();
@@ -1134,7 +1251,7 @@ const SettingsView: React.FC<{
                  <h3><SettingsIcon /> Configurações de Revisão</h3>
                  <div className="form-group">
                     <label htmlFor="review-order">Ordem da Revisão</label>
-                    <select id="review-order" className="settings-select" value={settings.review.order} onChange={e => onSettingsChange({ order: e.target.value as ReviewSettings['order'] })}>
+                    <select id="review-order" className="settings-select" value={settings.review.order} onChange={e => onReviewSettingsChange({ order: e.target.value as ReviewSettings['order'] })}>
                         <option value="default">Padrão (Mais antigos primeiro)</option>
                         <option value="random">Aleatória</option>
                         <option value="newestFirst">Mais novas primeiro</option>
@@ -1142,12 +1259,57 @@ const SettingsView: React.FC<{
                 </div>
                 <div className="form-group">
                     <label htmlFor="daily-limit">Limite Diário de Cartas (0 = sem limite)</label>
-                    <input id="daily-limit" className="settings-input" type="number" min="0" value={settings.review.dailyLimit} onChange={e => onSettingsChange({ dailyLimit: parseInt(e.target.value, 10) || 0 })} />
+                    <input id="daily-limit" className="settings-input" type="number" min="0" value={settings.review.dailyLimit} onChange={e => onReviewSettingsChange({ dailyLimit: parseInt(e.target.value, 10) || 0 })} />
+                </div>
+            </div>
+            <div className="settings-section">
+                <h3><ZapIcon /> Metas e Lembretes</h3>
+                 <div className="form-group">
+                    <label htmlFor="daily-goal">Meta Diária de XP</label>
+                    <input id="daily-goal" className="settings-input" type="number" min="0" step="10" value={settings.profile.dailyGoal} onChange={e => onProfileChange({ dailyGoal: parseInt(e.target.value, 10) || 0 })} />
+                </div>
+                 <div className="form-group">
+                    <label htmlFor="reminder-time">Horário do Lembrete Diário</label>
+                    <input id="reminder-time" className="settings-input" type="time" value={settings.profile.reminderTime} onChange={e => onProfileChange({ reminderTime: e.target.value })} />
+                </div>
+            </div>
+            <div className="settings-section">
+                <h3><BellIcon /> Notificações de Lembrete</h3>
+                {notificationPermission === 'unsupported' ? (
+                    <p>Seu navegador não suporta notificações.</p>
+                ) : (
+                    <>
+                        <p className="settings-description">Status atual: <strong>{permissionStatusText[notificationPermission]}</strong></p>
+                        <p className="settings-description">
+                            Receba um lembrete diário para não esquecer de revisar suas cartas.
+                        </p>
+                        {notificationPermission !== 'granted' && (
+                            <button className="btn" onClick={onRequestPermission}>
+                                Ativar Notificações
+                            </button>
+                        )}
+                        {notificationPermission === 'denied' && (
+                             <p className="settings-description" style={{fontSize: '0.85rem'}}>
+                                Para receber notificações, você precisa permitir nas configurações de site do seu navegador.
+                            </p>
+                        )}
+                    </>
+                )}
+            </div>
+            <div className="settings-section">
+                <h3><HelpCircleIcon /> Ajuda</h3>
+                <p className="settings-description">
+                    Não tem certeza de como funciona a revisão de cartas? Veja o tutorial novamente.
+                </p>
+                <div className="backup-actions">
+                     <button className="btn btn-outline" onClick={onStartReviewTutorial}>
+                        <EyeIcon /> Como funciona a revisão?
+                    </button>
                 </div>
             </div>
             <div className="settings-section">
                 <h3><CloudUploadIcon/> Backup & Restauração</h3>
-                 <p>
+                 <p className="settings-description">
                     Salve todos os seus dados em um código de texto ou exporte-os como um arquivo JSON (completo) ou CSV (para planilhas).
                 </p>
                 <div className="backup-actions">
@@ -1452,7 +1614,7 @@ const CommunityView: React.FC<{
                                             <button 
                                                 onClick={() => handleDownload(deck)} 
                                                 className="deck-action-btn download" 
-                                                title={`Baixar ${deck.name}`}
+                                                title={`Baixar ${deck.name} (+${XP_MAP.downloadDeck} XP)`}
                                                 disabled={downloading !== null}
                                             >
                                                 {downloading === deck.name ? <Loader isSmall={true} /> : <CloudDownloadIcon/>}
@@ -1536,7 +1698,7 @@ const ShareDeckModal: React.FC<{
                         Cancelar
                     </button>
                     <button onClick={handleConfirm} className="btn" disabled={!author.trim() || isLoading}>
-                        {isLoading ? <Loader isSmall={true} /> : 'Confirmar e Compartilhar'}
+                        {isLoading ? <Loader isSmall={true} /> : `Confirmar (+${XP_MAP.uploadDeck} XP)`}
                     </button>
                 </div>
             </div>
@@ -1550,78 +1712,20 @@ const App = () => {
     // --- ONE-TIME DATA MIGRATION ---
     useEffect(() => {
         const runDataMigration = () => {
-            const migrationKey = 'gaku-migration-v2-supermemo-complete';
+            const migrationKey = 'gaku-migration-v3-user-profile';
             if (localStorage.getItem(migrationKey) === 'true') {
                 return false; // Migration already done, no reload needed
             }
 
             console.log("Running one-time data migration check...");
             let migrationOccurred = false;
-
-            // --- Migration from "jp_flashcards" with `level` property ---
-            const oldJpDataKey = 'jp_flashcards';
-            const oldJpData = localStorage.getItem(oldJpDataKey);
-            const newGakuDataKey = 'gaku-cards';
-
-            if (oldJpData) {
-                try {
-                    const parsedCards = JSON.parse(oldJpData);
-                    // Check if it's the old format (array of cards, and first card has 'level')
-                    if (Array.isArray(parsedCards) && parsedCards.length > 0 && parsedCards[0].hasOwnProperty('level') && !parsedCards[0].hasOwnProperty('repetitions')) {
-                        console.log(`Found old data format in '${oldJpDataKey}'. Migrating...`);
-
-                        const today = new Date().toISOString();
-                        const migratedCards = parsedCards.map((oldCard: any) => {
-                            // Convert old card to new SuperMemo 2 format
-                            return {
-                                id: oldCard.id,
-                                front: oldCard.front,
-                                back: oldCard.back,
-                                category: oldCard.category || 'Vocabulário Básico', // Default category if missing
-                                // Reset SRS state, but preserve the card
-                                repetitions: 0,
-                                easinessFactor: 2.5,
-                                interval: 0, // Will be due for review immediately
-                                dueDate: today
-                            };
-                        });
-
-                        localStorage.setItem(newGakuDataKey, JSON.stringify(migratedCards));
-                        // Remove old key to prevent re-migration and conflicts
-                        localStorage.removeItem(oldJpDataKey); 
-                        migrationOccurred = true;
-                        console.log("Successfully migrated cards from `level` to SuperMemo 2 format.");
-                    }
-                } catch (e) {
-                    console.error(`Could not migrate corrupt data from key '${oldJpDataKey}'.`, e);
-                }
-            }
-
-            // --- Previous migration logic for key renaming (keep as fallback) ---
-            const keyMap = {
-                'cards': 'gaku-cards',
-                'studyHistory': 'gaku-study-history',
-                'reviewSettings': 'gaku-review-settings',
-                'theme': 'gaku-theme'
-            };
-
-            for (const [oldKey, newKey] of Object.entries(keyMap)) {
-                const oldData = localStorage.getItem(oldKey);
-                const newData = localStorage.getItem(newKey);
-
-                if (oldData && !newData) {
-                    try {
-                        JSON.parse(oldData); 
-                        localStorage.setItem(newKey, oldData);
-                        localStorage.removeItem(oldKey);
-                        console.log(`Successfully migrated data from '${oldKey}' to '${newKey}'.`);
-                        migrationOccurred = true;
-                    } catch (e) {
-                        console.error(`Could not migrate corrupt data for key '${oldKey}'.`, e);
-                    }
-                }
-            }
             
+            // --- Previous migration logic ---
+            const oldMigrationKey = 'gaku-migration-v2-supermemo-complete';
+            if(localStorage.getItem(oldMigrationKey)) {
+                // assume previous migrations ran
+            }
+
             // Mark this specific migration as complete.
             localStorage.setItem(migrationKey, 'true');
 
@@ -1664,6 +1768,17 @@ const App = () => {
         }
     });
 
+    const [userProfile, setUserProfile] = useState<UserProfile>(() => {
+        try {
+            const savedProfile = localStorage.getItem('gaku-user-profile');
+            const defaults: UserProfile = { streak: 0, lastStudiedDate: null, dailyGoal: 50, dailyXp: 0, dailyGoalMetDate: null, reminderTime: '10:00' };
+            const parsed = savedProfile ? JSON.parse(savedProfile) : {};
+            return { ...defaults, ...parsed };
+        } catch(e) {
+            return { streak: 0, lastStudiedDate: null, dailyGoal: 50, dailyXp: 0, dailyGoalMetDate: null, reminderTime: '10:00' };
+        }
+    });
+
     const [view, setView] = useState<View>('review');
     const [currentCategory, setCurrentCategory] = useState<string | null>(null);
     const [isFlipped, setIsFlipped] = useState(false);
@@ -1678,6 +1793,7 @@ const App = () => {
     const [isLoading, setIsLoading] = useState(false);
     const [reviewQueue, setReviewQueue] = useState<Card[]>([]);
     const [currentCardIndex, setCurrentCardIndex] = useState(0);
+    const [xpToastInfo, setXpToastInfo] = useState<{ amount: number; id: number } | null>(null);
 
     // Settings State
     const [theme, setTheme] = useState<Theme>(() => (localStorage.getItem('gaku-theme') as Theme) || 'light');
@@ -1695,6 +1811,9 @@ const App = () => {
     // Onboarding State
     const [isOnboarding, setIsOnboarding] = useState(false);
     const [onboardingStep, setOnboardingStep] = useState(0);
+    const [isReviewOnboarding, setIsReviewOnboarding] = useState(false);
+    const [reviewOnboardingStep, setReviewOnboardingStep] = useState(0);
+    const [viewBeforeTutorial, setViewBeforeTutorial] = useState<View>('review');
 
 
     // --- DERIVED STATE & MEMOS ---
@@ -1767,6 +1886,14 @@ const App = () => {
             console.error("Failed to save history to localStorage", e);
         }
     }, [studyHistory]);
+    
+    useEffect(() => {
+        try {
+            localStorage.setItem('gaku-user-profile', JSON.stringify(userProfile));
+        } catch (e) {
+            console.error("Failed to save user profile to localStorage", e);
+        }
+    }, [userProfile]);
 
     useEffect(() => {
         localStorage.setItem('gaku-theme', theme);
@@ -1782,13 +1909,56 @@ const App = () => {
         }
     }, []);
     
-     useEffect(() => {
+    useEffect(() => {
         if ('Notification' in window) {
-            setNotificationPermission(Notification.permission);
+            const permission = Notification.permission;
+            setNotificationPermission(permission);
+            if (permission === 'granted') {
+                 manageNotifications(userProfile, userProfile.streak);
+            }
         } else {
             setNotificationPermission('unsupported');
         }
     }, []);
+    
+    // Recalculate streak and handle daily XP reset
+    useEffect(() => {
+        const calculateCurrentStreak = (history: StudyDay[]): number => {
+            if (!history || history.length === 0) return 0;
+
+            const studiedDates = new Set(history.map(d => d.date));
+            let streak = 0;
+            const today = new Date();
+
+            const isStudied = (d: Date) => studiedDates.has(d.toISOString().split('T')[0]);
+
+            const checkDate = new Date();
+            if (!isStudied(checkDate)) {
+                checkDate.setDate(checkDate.getDate() - 1);
+            }
+
+            if (!isStudied(checkDate)) return 0;
+
+            while (isStudied(checkDate)) {
+                streak++;
+                checkDate.setDate(checkDate.getDate() - 1);
+            }
+            return streak;
+        };
+
+        const currentStreak = calculateCurrentStreak(studyHistory);
+        const todayStr = new Date().toISOString().split('T')[0];
+
+        setUserProfile(p => {
+            let newDailyXp = p.dailyXp;
+            // Reset daily XP if the last study day was not today AND today's goal hasn't been met.
+            if (p.lastStudiedDate !== todayStr && p.dailyGoalMetDate !== todayStr) {
+                newDailyXp = 0;
+            }
+            return { ...p, streak: currentStreak, dailyXp: newDailyXp };
+        });
+
+    }, [studyHistory]);
     
     useEffect(() => {
         if (movingCard) {
@@ -1828,15 +1998,44 @@ const App = () => {
 
     // Reset review state when category changes or view is left
     useEffect(() => {
+        // This effect should only clear the review state when the user navigates away from the review view.
         if (view !== 'review') {
             setCurrentCategory(null);
             setReviewQueue([]);
         }
+        // Always reset card index and flip state when view or category changes to start fresh.
         setCurrentCardIndex(0);
         setIsFlipped(false);
     }, [currentCategory, view]);
 
     // --- HANDLERS ---
+    const grantXp = (amount: number, options: { isStudy?: boolean } = {}) => {
+        if (amount <= 0) return;
+    
+        const todayStr = new Date().toISOString().split('T')[0];
+        setUserProfile(p => {
+            const newDailyXp = p.dailyXp + amount;
+            const goalMet = p.dailyGoal > 0 && newDailyXp >= p.dailyGoal;
+            const wasGoalAlreadyMet = p.dailyGoalMetDate === todayStr;
+    
+            if (goalMet && !wasGoalAlreadyMet) {
+                console.log(`Daily goal of ${p.dailyGoal} XP reached!`);
+                // Future: show a special "goal met" animation/toast
+            }
+    
+            const updatedProfile: Partial<UserProfile> = {
+                dailyXp: newDailyXp,
+                dailyGoalMetDate: goalMet ? todayStr : p.dailyGoalMetDate,
+            };
+            if(options.isStudy) {
+                updatedProfile.lastStudiedDate = todayStr;
+            }
+            return { ...p, ...updatedProfile };
+        });
+    
+        setXpToastInfo({ amount, id: Date.now() });
+    };
+
     const handleNavigate = (targetView: View) => {
         setEditingCard(null); // Clear any editing state when changing views
         setSelectedDeck(null); // Clear deck selection
@@ -1845,32 +2044,27 @@ const App = () => {
     };
 
     const handleSelectCategory = (category: string) => {
+        const reviewOnboardingComplete = localStorage.getItem('gaku-review-onboarding-complete') === 'true';
+
         let queue = dueCards.filter(c => c.category === category);
-    
-        // Apply sorting from settings
         switch (reviewSettings.order) {
-            case 'random':
-                // Create a copy before shuffling
-                queue = [...queue].sort(() => Math.random() - 0.5);
-                break;
-            case 'newestFirst':
-                // Assuming higher ID means newer card
-                queue.sort((a, b) => b.id - a.id);
-                break;
-            case 'default':
-            default:
-                queue.sort((a, b) => new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime()); // oldest due first
-                break;
+            case 'random': queue = [...queue].sort(() => Math.random() - 0.5); break;
+            case 'newestFirst': queue.sort((a, b) => b.id - a.id); break;
+            default: queue.sort((a, b) => new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime()); break;
         }
-    
-        // Apply daily limit if it's a positive number
         if (reviewSettings.dailyLimit > 0) {
             queue = queue.slice(0, reviewSettings.dailyLimit);
         }
-    
+
         setReviewQueue(queue);
         setCurrentCardIndex(0);
         setCurrentCategory(category);
+        
+        if (!reviewOnboardingComplete) {
+            setViewBeforeTutorial('review');
+            setIsReviewOnboarding(true);
+            setReviewOnboardingStep(0);
+        }
     };
 
     const handleShowAnswer = () => setIsFlipped(true);
@@ -1885,11 +2079,11 @@ const App = () => {
         const updatedSrs = calculateSuperMemo2(currentCard, quality);
         const updatedCard = { ...currentCard, ...updatedSrs };
         const isCorrect = quality === 'good' || quality === 'easy';
+        const xpGained = XP_MAP[quality];
 
         setTimeout(() => {
             setCards(prev => prev.map(c => c.id === currentCard.id ? updatedCard : c));
             
-             // Log the review for stats
             const todayStr = new Date().toISOString().split('T')[0];
             setStudyHistory(prev => {
                 const todayEntryIndex = prev.findIndex(d => d.date === todayStr);
@@ -1906,6 +2100,8 @@ const App = () => {
                     return [...prev, { date: todayStr, reviewed: 1, correct: isCorrect ? 1 : 0 }];
                 }
             });
+
+            grantXp(xpGained, { isStudy: true });
 
             setCurrentCardIndex(prev => prev + 1);
             
@@ -1935,6 +2131,7 @@ const App = () => {
             cardToSave = { ...newOrUpdatedCardData, id: newId } as Card;
             setCards(prevCards => [...prevCards, cardToSave]);
             sessionStorage.setItem('lastAddedCardId', String(newId));
+            grantXp(XP_MAP.addCard);
         }
     };
     
@@ -1966,6 +2163,7 @@ const App = () => {
             }));
 
         setCards(prev => [...prev.filter(c => c.repetitions !== -1), ...cardsToSave, ...placeholderCards]);
+        grantXp(XP_MAP.addCard * cardsToSave.length);
     };
 
     const handleEditCard = (card: Card) => {
@@ -2041,18 +2239,18 @@ const App = () => {
          setModalConfig({
             type: 'prompt',
             title: 'Criar Novo Baralho',
-            message: 'Digite o nome para o seu novo baralho.',
+            message: `Digite o nome para o seu novo baralho. (+${XP_MAP.newDeck} XP)`,
             confirmText: 'Criar',
             onConfirm: (deckName) => {
                 if (deckName) {
-                    if (existingCategories.some(c => c.toLowerCase() === deckName.trim().toLowerCase())) {
-                        alert(`Um baralho chamado "${deckName}" já existe.`);
+                    const trimmedDeckName = deckName.trim();
+                    if (existingCategories.some(c => c.toLowerCase() === trimmedDeckName.toLowerCase())) {
+                        alert(`Um baralho chamado "${trimmedDeckName}" já existe.`);
                         return;
                     }
                     
-                    // Add a placeholder to make the deck appear, even if empty
                     const placeholderCard: Omit<Card, 'id'> = {
-                        front: 'placeholder', back: 'placeholder', category: deckName.trim(), 
+                        front: 'placeholder', back: 'placeholder', category: trimmedDeckName, 
                         repetitions: -1, easinessFactor: -1, interval: -1, dueDate: ''
                     };
 
@@ -2060,8 +2258,9 @@ const App = () => {
                     const cardToSave = { ...placeholderCard, id: newId } as Card;
                     
                     setCards(prev => [...prev, cardToSave]);
-                    setSelectedDeck(deckName.trim());
+                    setSelectedDeck(trimmedDeckName);
                     setView('decks');
+                    grantXp(XP_MAP.newDeck);
                 }
             },
         });
@@ -2092,18 +2291,23 @@ const App = () => {
 
         if (result.success) {
             alert(`Baralho "${deckToShare}" compartilhado com a comunidade com sucesso!`);
+            grantXp(XP_MAP.uploadDeck);
         } else {
             alert(`Falha ao compartilhar o baralho: ${result.message || 'Erro desconhecido.'}`);
         }
     };
 
 
-    const handleSettingsChange = (newSettings: Partial<ReviewSettings>) => {
+    const handleReviewSettingsChange = (newSettings: Partial<ReviewSettings>) => {
         setReviewSettings(prev => {
             const updated = { ...prev, ...newSettings };
             localStorage.setItem('gaku-review-settings', JSON.stringify(updated));
             return updated;
         });
+    };
+    
+    const handleProfileChange = (newProfile: Partial<UserProfile>) => {
+        setUserProfile(prev => ({ ...prev, ...newProfile }));
     };
 
     const handleBackup = (): string => {
@@ -2111,6 +2315,7 @@ const App = () => {
             cards: cards.filter(c => c.repetitions !== -1), // Don't backup placeholders
             studyHistory: studyHistory,
             reviewSettings: reviewSettings,
+            userProfile: userProfile,
         };
         return btoa(unescape(encodeURIComponent(JSON.stringify(data))));
     };
@@ -2122,7 +2327,8 @@ const App = () => {
             if (parsed.cards && Array.isArray(parsed.cards)) {
                 setCards(parsed.cards);
                 if (parsed.studyHistory) setStudyHistory(parsed.studyHistory);
-                if (parsed.reviewSettings) handleSettingsChange(parsed.reviewSettings);
+                if (parsed.reviewSettings) handleReviewSettingsChange(parsed.reviewSettings);
+                if (parsed.userProfile) setUserProfile(parsed.userProfile);
             } else {
                 throw new Error("Formato de dados inválido.");
             }
@@ -2163,6 +2369,7 @@ const App = () => {
             cards: cards.filter(c => c.repetitions !== -1),
             studyHistory: studyHistory,
             reviewSettings: reviewSettings,
+            userProfile: userProfile,
         };
         const jsonString = `data:text/json;charset=utf-8,${encodeURIComponent(JSON.stringify(data, null, 2))}`;
         const link = document.createElement('a');
@@ -2206,20 +2413,24 @@ const App = () => {
                     if(newCards.length > 0) {
                          setCards(prev => [...prev.filter(c => c.repetitions !== -1), ...newCards]);
                          alert(`${newCards.length} carta(s) importada(s) com sucesso!`);
+                         grantXp(XP_MAP.addCard * newCards.length);
                          setView('decks');
                     } else {
                          throw new Error("Nenhuma carta válida encontrada no arquivo.");
                     }
                 } else if (file.name.toLowerCase().endsWith('.json')) {
-                    const parsed = JSON.parse(text);
-                    if (parsed.cards && Array.isArray(parsed.cards)) {
-                        setCards(parsed.cards);
-                        if (parsed.studyHistory) setStudyHistory(parsed.studyHistory);
-                        if (parsed.reviewSettings) handleSettingsChange(parsed.reviewSettings);
-                        alert('Dados restaurados com sucesso do arquivo JSON!');
-                        setView('review'); // Go to a neutral view
-                    } else {
-                        throw new Error("Formato de dados JSON inválido.");
+                    if (confirm('Restaurar de um arquivo JSON substituirá todos os seus baralhos, histórico e configurações atuais. Tem certeza que deseja continuar?')) {
+                        const parsed = JSON.parse(text);
+                        if (parsed.cards && Array.isArray(parsed.cards)) {
+                            setCards(parsed.cards);
+                            if (parsed.studyHistory) setStudyHistory(parsed.studyHistory);
+                            if (parsed.reviewSettings) handleReviewSettingsChange(parsed.reviewSettings);
+                            if (parsed.userProfile) setUserProfile(parsed.userProfile);
+                            alert('Dados restaurados com sucesso do arquivo JSON!');
+                            setView('review'); // Go to a neutral view
+                        } else {
+                            throw new Error("Formato de dados JSON inválido.");
+                        }
                     }
                 }
             } catch (error) {
@@ -2232,17 +2443,12 @@ const App = () => {
             alert("Não foi possível ler o arquivo.");
         };
 
-        if (file.name.toLowerCase().endsWith('.csv')) {
-            if (confirm('Importar um arquivo CSV irá adicionar as cartas ao seu baralho existente ou criar novos baralhos. Continuar?')) {
-                reader.readAsText(file, 'UTF-8');
-            }
-        } else if (file.name.toLowerCase().endsWith('.json')) {
-            if (confirm('Restaurar de um arquivo JSON substituirá todos os seus baralhos, histórico e configurações atuais. Tem certeza que deseja continuar?')) {
-                reader.readAsText(file, 'UTF-8');
-            }
-        } else {
-            alert("Formato de arquivo não suportado. Por favor, selecione um arquivo .csv ou .json.");
+        if (!file.name.toLowerCase().endsWith('.csv') && !file.name.toLowerCase().endsWith('.json')) {
+             alert("Formato de arquivo não suportado. Por favor, selecione um arquivo .csv ou .json.");
+             return;
         }
+
+        reader.readAsText(file, 'UTF-8');
     };
 
 
@@ -2269,6 +2475,7 @@ const App = () => {
         if (newCardsToAdd.length > 0) {
             setCards(prev => [...prev.filter(c => c.repetitions !== -1), ...newCardsToAdd]);
             alert(`${newCardsToAdd.length} nova(s) carta(s) adicionada(s) ao baralho "${deck.name}"!`);
+            grantXp(XP_MAP.downloadDeck);
         } else {
             alert(`O baralho "${deck.name}" já está atualizado com todas as cartas da comunidade.`);
         }
@@ -2276,11 +2483,34 @@ const App = () => {
         setSelectedDeck(deck.name);
     };
 
+    const handleRequestNotificationPermission = async () => {
+        const status = await requestNotificationPermission();
+        setNotificationPermission(status);
+        if (status === 'granted') {
+            alert('Notificações ativadas! Você será lembrado de estudar.');
+            manageNotifications(userProfile, userProfile.streak);
+        } else if (status === 'denied') {
+            alert('As notificações foram bloqueadas. Para ativá-las, você precisa alterar as permissões de notificação para este site nas configurações do seu navegador.');
+        }
+    };
+
+    const handleStartReviewTutorial = () => {
+        setViewBeforeTutorial(view); // Save current view
+        // Create a dummy queue for the tutorial
+        const dummyCard = cards.find(c => c.repetitions !== -1) || getInitialCards()[0];
+        setReviewQueue([dummyCard]);
+        setCurrentCardIndex(0);
+        
+        setIsReviewOnboarding(true);
+        setReviewOnboardingStep(0);
+        setView('review'); // Switch to review view to show the elements
+    };
+
     const toggleTheme = () => setTheme(prev => prev === 'light' ? 'dark' : 'light');
 
     const renderContent = () => {
         if (isLoading && !deckToShare) return <Loader />; // Full screen loader, except for share modal
-        if (isOnboarding) return null; // Tour handles its own UI
+        if (isOnboarding || isReviewOnboarding) return null; // Tour handles its own UI
         
         if (practiceDeck) {
             return <PracticeView cards={cardsInPracticeDeck} deckName={practiceDeck} onEnd={() => setPracticeDeck(null)} />;
@@ -2330,13 +2560,17 @@ const App = () => {
 
         if (view === 'settings') {
             return <SettingsView 
-                settings={{ review: reviewSettings }}
-                onSettingsChange={handleSettingsChange}
+                settings={{ review: reviewSettings, profile: userProfile }}
+                onReviewSettingsChange={handleReviewSettingsChange}
+                onProfileChange={handleProfileChange}
                 onBackup={handleBackup}
                 onRestore={handleRestore}
                 onExportJson={handleExportJson}
                 onExportCsv={handleExportCsv}
                 onImport={handleImportFile}
+                notificationPermission={notificationPermission}
+                onRequestPermission={handleRequestNotificationPermission}
+                onStartReviewTutorial={handleStartReviewTutorial}
             />;
         }
 
@@ -2373,57 +2607,41 @@ const App = () => {
                 </div>
             );
         }
+        
+        // After finishing a queue, schedule notifications
+        if(currentCategory && !currentCard) {
+            manageNotifications(userProfile, userProfile.streak);
+        }
 
         if (decksWithDueCounts.length > 0) {
              return <CategorySelection decks={decksWithDueCounts} onSelectCategory={handleSelectCategory} />;
         }
         
-        return <SessionComplete onAddMore={() => setView('bulk-add')} onGoToDecks={() => setView('decks')} />;
+        return <SessionComplete onAddMore={() => setView('bulk-add')} onGoToDecks={() => setView('decks')} streak={userProfile.streak} />;
     };
     
     // --- Onboarding Tour Component ---
-    const OnboardingTour = () => {
-        const tourSteps = [
-            {
-                elementId: 'nav-review',
-                title: 'Bem-vindo ao Gaku!',
-                text: 'Esta é a tela de Revisão. Aqui você verá as cartas que precisam ser estudadas hoje com base na repetição espaçada.',
-                position: 'top',
-            },
-            {
-                elementId: 'nav-decks',
-                title: 'Gerenciar Baralhos',
-                text: 'Aqui você pode ver todas as suas cartas, editar baralhos existentes e praticar sem o sistema de repetição.',
-                position: 'top',
-            },
-            {
-                elementId: 'nav-add',
-                title: 'Adicionar Cartas',
-                text: 'Use este botão para criar novas cartas e baralhos para os seus estudos.',
-                position: 'top',
-                isRound: true,
-            },
-            {
-                elementId: 'nav-community',
-                title: 'Explore a Comunidade',
-                text: 'Baixe baralhos compartilhados por outros usuários para expandir seus estudos.',
-                position: 'top',
-            },
-            {
-                elementId: 'header-stats-btn',
-                title: 'Acompanhe seu Progresso',
-                text: 'Clique aqui a qualquer momento para ver suas estatísticas de estudo, como o histórico de revisões e o domínio das cartas.',
-                position: 'bottom',
-                isRound: true,
-            }
-        ];
+    const OnboardingTour: React.FC<{
+        isActive: boolean;
+        steps: any[];
+        currentStepIndex: number;
+        onNext: () => void;
+        onPrev: () => void;
+        onEnd: () => void;
+        options?: { isCardFlipped?: boolean; onFlipCard?: () => void };
+    }> = ({ isActive, steps, currentStepIndex, onNext, onPrev, onEnd, options }) => {
         
-        const currentStep = tourSteps[onboardingStep];
+        const currentStep = steps[currentStepIndex];
         const holeRef = useRef<HTMLDivElement>(null);
         const tooltipRef = useRef<HTMLDivElement>(null);
 
         useLayoutEffect(() => {
-            if (!isOnboarding || !currentStep) return;
+            if (!isActive || !currentStep) return;
+
+            // Flip card if needed for the current step
+            if(options?.onFlipCard && options.isCardFlipped !== currentStep.isFlipped) {
+                options.onFlipCard();
+            }
         
             const targetElement = document.getElementById(currentStep.elementId);
             const holeEl = holeRef.current;
@@ -2509,16 +2727,10 @@ const App = () => {
                 const arrowPositionH = elementCenterH - left;
                 tooltipEl.style.setProperty('--arrow-left-pos', `${arrowPositionH}px`);
             }
-        }, [onboardingStep, isOnboarding]);
+        }, [currentStepIndex, isActive, options?.isCardFlipped]);
 
-        const nextStep = () => setOnboardingStep(s => Math.min(s + 1, tourSteps.length - 1));
-        const prevStep = () => setOnboardingStep(s => Math.max(s - 1, 0));
-        const endTour = () => {
-            localStorage.setItem('gaku-onboarding-complete', 'true');
-            setIsOnboarding(false);
-        };
 
-        if (!isOnboarding) return null;
+        if (!isActive) return null;
 
         return (
              <div className="onboarding-container">
@@ -2528,18 +2740,18 @@ const App = () => {
                     '--arrow-left-pos': '50%'
                 } as React.CSSProperties}>
                     <div className="onboarding-tooltip-arrow" />
-                     <button onClick={endTour} className="onboarding-close-btn" aria-label="Fechar tour"><XIcon /></button>
+                     <button onClick={onEnd} className="onboarding-close-btn" aria-label="Fechar tour"><XIcon /></button>
                     <h4>{currentStep.title}</h4>
                     <p>{currentStep.text}</p>
                     <div className="onboarding-nav">
                         <div className="onboarding-dots">
-                            {tourSteps.map((_, i) => <div key={i} className={`onboarding-dot ${i === onboardingStep ? 'active' : ''}`} />)}
+                            {steps.map((_, i) => <div key={i} className={`onboarding-dot ${i === currentStepIndex ? 'active' : ''}`} />)}
                         </div>
                         <div className="onboarding-nav-buttons">
-                           {onboardingStep > 0 && <button onClick={prevStep} className="btn btn-cancel">Anterior</button>}
-                           {onboardingStep < tourSteps.length - 1 
-                                ? <button onClick={nextStep} className="btn">Próximo</button>
-                                : <button onClick={endTour} className="btn">Começar!</button>
+                           {currentStepIndex > 0 && <button onClick={onPrev} className="btn btn-cancel">Anterior</button>}
+                           {currentStepIndex < steps.length - 1 
+                                ? <button onClick={onNext} className="btn">Próximo</button>
+                                : <button onClick={onEnd} className="btn">Começar!</button>
                            }
                         </div>
                     </div>
@@ -2548,19 +2760,51 @@ const App = () => {
         );
     };
 
+    const mainTourSteps = [
+        { elementId: 'nav-review', title: 'Bem-vindo ao Gaku!', text: 'Esta é a tela de Revisão. Aqui você verá as cartas que precisam ser estudadas hoje com base na repetição espaçada.', position: 'top' },
+        { elementId: 'nav-decks', title: 'Gerenciar Baralhos', text: 'Aqui você pode ver todas as suas cartas, editar baralhos existentes e praticar sem o sistema de repetição.', position: 'top' },
+        { elementId: 'nav-add', title: 'Adicionar Cartas', text: 'Use este botão para criar novas cartas e baralhos para os seus estudos.', position: 'top', isRound: true },
+        { elementId: 'nav-community', title: 'Explore a Comunidade', text: 'Baixe baralhos compartilhados por outros usuários para expandir seus estudos.', position: 'top' },
+        { elementId: 'header-stats-btn', title: 'Acompanhe seu Progresso', text: 'Clique aqui a qualquer momento para ver suas estatísticas de estudo, como o histórico de revisões e o domínio das cartas.', position: 'bottom', isRound: true }
+    ];
+
+    const reviewTourSteps = [
+        { elementId: 'flashcard-container', title: 'Como Revisar', text: 'Primeiro, veja o conteúdo na frente da carta e tente se lembrar do que está no verso.', position: 'bottom', isFlipped: false },
+        { elementId: 'show-answer-btn', title: 'Revele a Resposta', text: 'Depois de tentar lembrar, clique aqui para virar a carta e ver se você acertou.', position: 'top', isFlipped: false },
+        { elementId: 'srs-buttons-container', title: 'Avalie sua Dificuldade', text: 'Selecione uma opção com base na dificuldade que você teve para lembrar: "Errei", "OK" (se foi difícil) ou "Fácil".', position: 'top', isFlipped: true },
+        { elementId: 'flashcard-container', title: 'Pronto!', text: 'O Gaku usará sua resposta para decidir quando mostrar esta carta novamente. Continue assim para fortalecer sua memória!', position: 'bottom', isFlipped: true }
+    ];
 
     return (
         <>
             <div className="app-container">
-                <header>
-                    <h1>Gaku APP</h1>
-                    <div className="header-actions">
-                         <StatsButton onClick={() => setView('stats')} />
-                        <DarkModeToggle theme={theme} toggleTheme={toggleTheme} />
-                    </div>
-                </header>
+                <Header 
+                    profile={userProfile}
+                    onStatsClick={() => setView('stats')}
+                    theme={theme}
+                    toggleTheme={toggleTheme}
+                />
                 <div className="content-wrapper">
-                    {renderContent()}
+                    {view === 'review' && currentCard && (
+                         <div className="review-view">
+                            <Flashcard
+                                card={currentCard}
+                                isFlipped={isFlipped}
+                                onFlip={handleShowAnswer}
+                                feedbackState={feedbackState}
+                                onSwipe={handleSwipeFeedback}
+                                mode="review"
+                            />
+                            <Controls
+                                isFlipped={isFlipped}
+                                onShowAnswer={handleShowAnswer}
+                                onFeedback={handleFeedback}
+                                progressText={`${currentCardIndex + 1} / ${reviewQueue.length}`}
+                            />
+                        </div>
+                    )}
+                    {/* Render other content, but not review view if it's already rendered above */}
+                    {!(view === 'review' && currentCard) && renderContent()}
                 </div>
                  <NavBar currentView={view} onNavigate={handleNavigate} reviewCount={dueCards.length} />
             </div>
@@ -2576,7 +2820,36 @@ const App = () => {
                     isLoading={isLoading}
                 />
              )}
-             <OnboardingTour />
+             {xpToastInfo && <XpGainToast amount={xpToastInfo.amount} key={xpToastInfo.id} />}
+             <OnboardingTour
+                isActive={isOnboarding}
+                steps={mainTourSteps}
+                currentStepIndex={onboardingStep}
+                onNext={() => setOnboardingStep(s => s + 1)}
+                onPrev={() => setOnboardingStep(s => s - 1)}
+                onEnd={() => {
+                    localStorage.setItem('gaku-onboarding-complete', 'true');
+                    setIsOnboarding(false);
+                }}
+             />
+             <OnboardingTour
+                isActive={isReviewOnboarding}
+                steps={reviewTourSteps}
+                currentStepIndex={reviewOnboardingStep}
+                onNext={() => setReviewOnboardingStep(s => s + 1)}
+                onPrev={() => setReviewOnboardingStep(s => s - 1)}
+                onEnd={() => {
+                    localStorage.setItem('gaku-review-onboarding-complete', 'true');
+                    setIsReviewOnboarding(false);
+                    if (viewBeforeTutorial !== 'review') {
+                        handleNavigate(viewBeforeTutorial);
+                    }
+                }}
+                options={{
+                    isCardFlipped: isFlipped,
+                    onFlipCard: () => setIsFlipped(f => !f),
+                }}
+             />
         </>
     );
 };

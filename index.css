@@ -1,4 +1,5 @@
 
+
 :root {
   /* WhatsApp Light Theme Palette */
   --primary-color: #008069; /* Darker green for titles, active icons */
@@ -27,6 +28,8 @@
   --srs-blue: #4285f4;
   --srs-green: #34a853;
   --srs-gold: #fbbc05;
+  --streak-flame-color: #ff9800;
+  --xp-color: #9c27b0;
 
   --filter-btn-active-bg: #e7ffdb;
   --filter-btn-active-text: var(--primary-color);
@@ -54,6 +57,8 @@ html[data-theme="dark"] {
   --input-background-color: #2a3942;
   
   --box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  --streak-flame-color: #ffb74d;
+  --xp-color: #ce93d8;
 
   /* Filter variables for dark mode */
   --filter-btn-active-bg: var(--primary-color);
@@ -92,22 +97,84 @@ body {
 }
 
 header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 24px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 24px;
 }
-
-h1 {
-  color: var(--title-color);
-  font-size: 1.75rem;
+.header-main {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-shrink: 1;
+    min-width: 0;
 }
-
-.header-actions {
+.header-main h1 {
+    color: var(--title-color);
+    font-size: 1.75rem;
+    white-space: nowrap;
+}
+.header-gamification {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+.streak-display {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 1.25rem;
+    font-weight: bold;
+    color: var(--streak-flame-color);
+}
+.streak-display svg {
+    width: 24px;
+    height: 24px;
+    color: var(--streak-flame-color);
+}
+.header-side {
     display: flex;
     align-items: center;
     gap: 8px;
+    flex-shrink: 0;
 }
+.daily-goal-progress {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background-color: var(--background-color);
+    border: 1px solid var(--border-color);
+    border-radius: 20px;
+    padding: 4px 8px 4px 4px;
+    min-width: 80px;
+    font-size: 0.8rem;
+    font-weight: bold;
+    position: relative;
+    overflow: hidden;
+    color: var(--xp-color);
+}
+.daily-goal-progress svg {
+    width: 16px;
+    height: 16px;
+    color: var(--xp-color);
+    z-index: 2;
+}
+.daily-goal-progress span {
+    z-index: 2;
+}
+.daily-goal-bar {
+    position: absolute;
+    left: 0;
+    top: 0;
+    height: 100%;
+    background-color: var(--xp-color);
+    opacity: 0.2;
+    border-radius: 20px;
+    transition: width 0.5s ease;
+    z-index: 1;
+}
+
 
 .content-wrapper {
   flex-grow: 1;
@@ -856,18 +923,27 @@ html[data-theme="dark"] .dialog-select {
     box-shadow: var(--box-shadow);
     display: flex;
     flex-direction: column;
-    gap: 24px;
+    gap: 16px;
     align-items: center;
     transition: background-color 0.3s ease;
 }
 .session-complete h2 { color: var(--srs-green); margin: 0; }
 .session-complete p { margin: 0; }
+.session-complete .streak-message {
+    color: var(--secondary-text-color);
+    font-size: 1.1rem;
+}
+.session-complete .streak-message strong {
+    color: var(--streak-flame-color);
+}
+
 .session-complete-actions {
     display: flex;
     flex-direction: column;
     gap: 12px;
     width: 100%;
     max-width: 300px;
+    margin-top: 8px;
 }
 
 .session-complete-actions .btn {
@@ -918,6 +994,47 @@ html[data-theme="dark"] .dialog-select {
     z-index: 2;
 }
 
+/* --- XP Gain Toast --- */
+.xp-toast-container {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    z-index: 4000;
+    pointer-events: none;
+}
+
+.xp-toast-content {
+    background-color: var(--xp-color);
+    color: white;
+    padding: 6px 12px;
+    border-radius: 20px;
+    font-size: 1rem;
+    font-weight: bold;
+    white-space: nowrap;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+    animation: xp-toast-animation 2s cubic-bezier(0.1, 0.9, 0.2, 1) forwards;
+}
+
+@keyframes xp-toast-animation {
+    0% {
+        transform: translateY(20px);
+        opacity: 0;
+    }
+    20% {
+        transform: translateY(0);
+        opacity: 1;
+    }
+    80% {
+        transform: translateY(0);
+        opacity: 1;
+    }
+    100% {
+        transform: translateY(-50px);
+        opacity: 0;
+    }
+}
+
+
 /* --- Settings View & Backup --- */
 .settings-view {
     display: flex;
@@ -956,10 +1073,13 @@ html[data-theme="dark"] .dialog-select {
     width: 22px;
     height: 22px;
 }
-.settings-section p {
+.settings-section p, .settings-description {
     font-size: 0.9rem;
     color: var(--secondary-text-color);
     line-height: 1.4;
+}
+.settings-section p strong {
+    color: var(--text-color);
 }
 .settings-section textarea {
     width: 100%;
