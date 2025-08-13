@@ -1,16 +1,5 @@
-# Run and deploy your AI Studio app
+# GAKU APP
 
-This contains everything you need to run your app locally.
-
-View your app in AI Studio: https://ai.studio/apps/drive/1Ob1hyxh8-S5dzhDJWQuV3XpFYE64SryU?showAssistant=true&showCode=true&showPreview=true
-
-## Run Locally
-
-**Prerequisites:**  Node.js
-
-
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+Meu app pessoal de revisão 
+=======
+online on https://gaku-app.netlify.app/
