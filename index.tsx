@@ -328,21 +328,23 @@ const NavBar: React.FC<{
     </nav>
 );
 
-const Flashcard: React.FC<{ 
-    card: Card; 
-    isFlipped: boolean; 
+const Flashcard: React.FC<{
+    card: Card;
+    isFlipped: boolean;
     onFlip: () => void;
     feedbackState: string;
     onSwipe: (direction: 'left' | 'right' | 'up') => void;
-}> = ({ card, isFlipped, onFlip, feedbackState, onSwipe }) => {
+    mode: 'review' | 'practice';
+}> = ({ card, isFlipped, onFlip, feedbackState, onSwipe, mode }) => {
     const frontEl = useRef<HTMLDivElement>(null);
     const backEl = useRef<HTMLDivElement>(null);
     const [frontHasScroll, setFrontHasScroll] = useState(false);
     const [backHasScroll, setBackHasScroll] = useState(false);
     const cardRef = useRef<HTMLDivElement>(null);
-    const touchStartX = useRef(0);
-    const touchCurrentX = useRef(0);
-    const isSwiping = useRef(false);
+
+    // --- State for gesture detection ---
+    const pointerStartRef = useRef({ x: 0, y: 0, time: 0 });
+    const isInteracting = useRef(false);
 
     const getFontSizeClass = (text: string) => {
         const len = text.length;
@@ -360,45 +362,99 @@ const Flashcard: React.FC<{
         }
     }, [card, isFlipped]);
 
+    const handleInteractionStart = (clientX: number, clientY: number) => {
+        isInteracting.current = true;
+        pointerStartRef.current = {
+            x: clientX,
+            y: clientY,
+            time: Date.now()
+        };
+    };
+
     const handleTouchStart = (e: React.TouchEvent) => {
-        if (isFlipped) return;
-        touchStartX.current = e.touches[0].clientX;
-        isSwiping.current = true;
-        if (cardRef.current) {
+        handleInteractionStart(e.touches[0].clientX, e.touches[0].clientY);
+        const allowSwipeViz = (mode === 'review' && isFlipped) || (mode === 'practice' && !isFlipped);
+        if (allowSwipeViz && cardRef.current) {
             cardRef.current.classList.add('is-swiping');
         }
     };
     
     const handleTouchMove = (e: React.TouchEvent) => {
-        if (!isSwiping.current || isFlipped) return;
-        touchCurrentX.current = e.touches[0].clientX;
-        const diff = touchCurrentX.current - touchStartX.current;
+        if (!isInteracting.current) return;
+        
+        const allowSwipeViz = (mode === 'review' && isFlipped) || (mode === 'practice' && !isFlipped);
+        if (!allowSwipeViz) return;
+
+        const diffX = e.touches[0].clientX - pointerStartRef.current.x;
         if (cardRef.current) {
-            cardRef.current.style.transform = `translateX(${diff}px)`;
+            cardRef.current.style.transform = `translateX(${diffX}px)`;
         }
     };
 
-    const handleTouchEnd = () => {
-        if (!isSwiping.current) return;
-        isSwiping.current = false;
+    const handleTouchEnd = (e: React.TouchEvent) => {
+        if (!isInteracting.current) return;
+        isInteracting.current = false;
         
         if (cardRef.current) {
             cardRef.current.classList.remove('is-swiping');
-            cardRef.current.style.transform = ''; // Reset transform
+            cardRef.current.style.transform = '';
         }
     
-        const diff = touchCurrentX.current - touchStartX.current;
-        
-        if (Math.abs(diff) > 80) { // Swipe threshold
-            if (diff < 0) { // Swiped left
-                onSwipe('left'); // Again
-            } else { // Swiped right
-                onSwipe('right'); // Good
-            }
+        const touchEnd = { x: e.changedTouches[0].clientX, y: e.changedTouches[0].clientY };
+        const duration = Date.now() - pointerStartRef.current.time;
+        const diffX = touchEnd.x - pointerStartRef.current.x;
+        const diffY = touchEnd.y - pointerStartRef.current.y;
+
+        // TAP LOGIC
+        if (duration < 300 && Math.abs(diffX) < 10 && Math.abs(diffY) < 10) {
+            onFlip();
+            return; 
         }
         
-        touchStartX.current = 0;
-        touchCurrentX.current = 0;
+        // SWIPE LOGIC
+        const swipeThreshold = 60;
+        const isHorizontalSwipe = Math.abs(diffX) > Math.abs(diffY) * 1.5;
+        const isVerticalSwipe = mode === 'review' && Math.abs(diffY) > Math.abs(diffX) * 1.5;
+
+        const canSwipe = (mode === 'review' && isFlipped) || (mode === 'practice' && !isFlipped);
+        
+        if (canSwipe) {
+            if (isHorizontalSwipe) {
+                if (diffX < -swipeThreshold) onSwipe('left');
+                else if (diffX > swipeThreshold) onSwipe('right');
+            } else if (isVerticalSwipe) { // Only relevant for review mode
+                if (diffY < -swipeThreshold) onSwipe('up');
+            }
+        }
+    };
+
+    // --- Mouse handlers for desktop click ---
+    const handleMouseDown = (e: React.MouseEvent) => {
+        if (e.button !== 0) return; // Only main button
+        // Do not handle mouse events on touch devices to prevent double firing
+        if ('ontouchstart' in window || navigator.maxTouchPoints > 0) return;
+        handleInteractionStart(e.clientX, e.clientY);
+    };
+
+    const handleMouseUp = (e: React.MouseEvent) => {
+        if ('ontouchstart' in window || navigator.maxTouchPoints > 0 || !isInteracting.current) return;
+        isInteracting.current = false;
+        
+        const duration = Date.now() - pointerStartRef.current.time;
+        const diffX = e.clientX - pointerStartRef.current.x;
+        const diffY = e.clientY - pointerStartRef.current.y;
+
+        // CLICK LOGIC
+        if (duration < 300 && Math.abs(diffX) < 10 && Math.abs(diffY) < 10) {
+            onFlip();
+        }
+    };
+
+    const handleMouseLeave = () => {
+        // Cancel interaction if mouse leaves while pressed
+        if (isInteracting.current) {
+            isInteracting.current = false;
+        }
     };
 
 
@@ -408,9 +464,12 @@ const Flashcard: React.FC<{
             onTouchStart={handleTouchStart}
             onTouchMove={handleTouchMove}
             onTouchEnd={handleTouchEnd}
+            onMouseDown={handleMouseDown}
+            onMouseUp={handleMouseUp}
+            onMouseLeave={handleMouseLeave}
             ref={cardRef}
         >
-            <div className={`flashcard ${isFlipped ? 'is-flipped' : ''}`} onClick={onFlip}>
+            <div className={`flashcard ${isFlipped ? 'is-flipped' : ''}`}>
                 <div className="flashcard-face flashcard-front">
                     <div ref={frontEl} className={`${getFontSizeClass(card.front)} ${frontHasScroll ? 'has-scroll-indicator' : ''}`}>{card.front}</div>
                 </div>
@@ -1008,6 +1067,17 @@ const SessionComplete: React.FC<{ onAddMore: () => void; onGoToDecks: () => void
     );
 };
 
+const WelcomeEmptyState: React.FC<{ onAddNewDeck: () => void }> = ({ onAddNewDeck }) => (
+    <div className="empty-state-container">
+        <ListIcon />
+        <h3>Bem-vindo ao Gaku!</h3>
+        <p>Parece que você ainda não tem nenhum baralho. Crie o seu primeiro para começar a adicionar cartas e revisar.</p>
+        <button className="btn" onClick={onAddNewDeck}>
+            <PlusIcon /> Criar Meu Primeiro Baralho
+        </button>
+    </div>
+);
+
 const SettingsView: React.FC<{
     settings: { review: ReviewSettings };
     onSettingsChange: (newSettings: Partial<ReviewSettings>) => void;
@@ -1265,7 +1335,7 @@ const PracticeView: React.FC<{
     }, [cards.length]);
     
     const handlePracticeSwipe = useCallback((direction: 'left' | 'right' | 'up') => {
-        // Flashcard component prevents swipe when flipped
+        // In practice mode, swipe is for navigation on the front of the card
         if (direction === 'left') { // swipe left for next card
             goToNext();
         } else if (direction === 'right') { // swipe right for previous card
@@ -1280,7 +1350,7 @@ const PracticeView: React.FC<{
                 <h3>Praticando: {deckName}</h3>
                 <div className="progress">{currentIndex + 1}/{cards.length}</div>
             </div>
-            <Flashcard card={currentCard} isFlipped={isFlipped} onFlip={() => setIsFlipped(!isFlipped)} feedbackState="" onSwipe={handlePracticeSwipe} />
+            <Flashcard card={currentCard} isFlipped={isFlipped} onFlip={() => setIsFlipped(!isFlipped)} feedbackState="" onSwipe={handlePracticeSwipe} mode="practice" />
             <div className="practice-controls">
                 <button onClick={goToPrev} className="icon-btn" aria-label="Carta Anterior"><ArrowLeftIcon/></button>
                 <button onClick={() => setIsFlipped(!isFlipped)} className="btn">
@@ -1849,6 +1919,8 @@ const App = () => {
             handleFeedback('again');
         } else if (direction === 'right') {
             handleFeedback('good');
+        } else if (direction === 'up') {
+            handleFeedback('easy');
         }
     };
 
@@ -2277,6 +2349,10 @@ const App = () => {
         }
 
         // --- Review View Logic ---
+        if (allDecks.length === 0) {
+            return <WelcomeEmptyState onAddNewDeck={handleAddNewDeck} />;
+        }
+
         if (currentCategory && currentCard) {
             return (
                 <div className="review-view">
@@ -2286,6 +2362,7 @@ const App = () => {
                         onFlip={handleShowAnswer}
                         feedbackState={feedbackState}
                         onSwipe={handleSwipeFeedback}
+                        mode="review"
                     />
                     <Controls
                         isFlipped={isFlipped}
