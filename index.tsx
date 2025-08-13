@@ -255,7 +255,7 @@ const manageNotifications = (profile: UserProfile, streak: number) => {
                 // It's not evening yet, schedule a "streak danger" notification for the evening
                 targetTime.setHours(21, 0, 0, 0);
                  title = 'Sua ofensiva está em perigo! 😨';
-                 body = `Pratique hoje para manter sua ofensiva de ${streak} dia(s) viva. O Gaku coruja acredita em você!`;
+                 body = `Pratique hoje para manter sua ofensiva de ${streak} dia(s) viva. O Gaku acredita em você!`;
             } else {
                 // It's already past the danger notification time. Schedule for tomorrow.
                 const [hours, minutes] = profile.reminderTime.split(':').map(Number);
