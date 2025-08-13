@@ -5,9 +5,7 @@
   command = "npm run build"
   # A pasta onde o resultado do build é colocado
   publish = "dist"
-  # A pasta onde estão as suas funções de backend
-  functions = "netlify/functions/"
 
-[build.environment]
-  # A sintaxe correta para dizer ao scanner para ignorar a chave do Google Analytics
-  SECRETS_SCAN_OMIT_KEYS = '["VITE_GA_MEASUREMENT_ID"]'
+[functions]
+  # A pasta onde estão as suas funções de backend
+  directory = "netlify/functions/"
