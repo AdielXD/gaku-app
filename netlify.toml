@@ -1,7 +1,16 @@
-# netlify.toml
-[functions]
-  directory = "netlify/functions/"
+# Ficheiro de configuração da Netlify
 
 [build]
+  # Publica a pasta 'dist' após o build
+  publish = "dist"
+  # O comando para construir o site
+  command = "npm run build"
+
+[build.environment]
   # Diz ao scanner de segredos para ignorar esta chave específica
-  environment = { SECRETS_SCAN_OMIT_KEYS = ["VITE_GA_MEASUREMENT_ID"] }
+  # A sintaxe correta é com a lista entre aspas simples
+  SECRETS_SCAN_OMIT_KEYS = '["VITE_GA_MEASUREMENT_ID"]'
+
+[functions]
+  # A pasta onde estão as suas funções de backend
+  directory = "netlify/functions/"
