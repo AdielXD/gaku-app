@@ -1,3 +1,4 @@
+
 import React, { useState, useMemo, useEffect, useRef, useLayoutEffect, useCallback } from 'react';
 import { createRoot } from 'react-dom/client';
 
@@ -27,23 +28,6 @@ const DownloadIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="24" he
 const Share2Icon = () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/></svg>;
 const ArrowRightLeftIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 17l-4-4 4-4"/><path d="M7 13h10"/><path d="M13 7l4 4-4 4"/></svg>;
 
-
-// --- GA & ANALYTICS ---
-declare global {
-    interface Window {
-        gtag?: (...args: any[]) => void;
-        dataLayer: any[];
-    }
-}
-
-const trackEvent = (action: string, params?: { [key: string]: any }) => {
-    if (window.gtag) {
-        window.gtag('event', action, params);
-    } else {
-        // This might be noisy if GA is blocked by an ad blocker.
-        // console.warn(`GA not initialized, but tried to track event: ${action}`);
-    }
-};
 
 // --- INTERFaces, TYPES & CONSTANTS ---
 interface Card {
@@ -144,1892 +128,2473 @@ const communityApi = {
             throw new Error(errorBody.error || `HTTP error! status: ${response.status}`);
         }
         return { success: true };
-     } catch (error) {
-        console.error(`Error uploading deck ${deckData.name}:`, error);
-        return { success: false, message: error instanceof Error ? error.message : 'Unknown error' };
+     } catch (error: any) {
+        console.error("Error uploading deck:", error);
+        return { success: false, message: error.message };
      }
   },
 };
 
-// --- DATABASE HOOKS (using local storage) ---
-const usePersistentState = <T,>(key: string, defaultValue: T): [T, React.Dispatch<React.SetStateAction<T>>] => {
-  const [state, setState] = useState<T>(() => {
-    try {
-      const storedValue = localStorage.getItem(key);
-      return storedValue ? JSON.parse(storedValue) : defaultValue;
-    } catch (error) {
-      console.error(`Error reading from localStorage for key "${key}":`, error);
-      return defaultValue;
+// --- HELPERS ---
+const calculateNextDueDate = (interval: number): Date => {
+    const now = new Date();
+    now.setDate(now.getDate() + interval);
+    now.setHours(5, 0, 0, 0); // Due at 5 AM
+    return now;
+};
+
+const calculateSuperMemo2 = (card: Card, quality: FeedbackType): Pick<Card, 'repetitions' | 'easinessFactor' | 'interval' | 'dueDate'> => {
+    // Map button quality to SM-2 quality rating q (0-5)
+    const q = quality === 'again' ? 2 : (quality === 'good' ? 4 : 5);
+
+    if (q < 3) { // Incorrect response: Reset repetition sequence.
+        return {
+            repetitions: 0,
+            easinessFactor: card.easinessFactor, // EF is not changed
+            interval: 1, // Reset interval to 1 day
+            dueDate: calculateNextDueDate(1).toISOString(),
+        };
     }
-  });
 
-  useEffect(() => {
-    try {
-      localStorage.setItem(key, JSON.stringify(state));
-    } catch (error) {
-      console.error(`Error writing to localStorage for key "${key}":`, error);
+    // Correct response:
+    let newRepetitions: number;
+    let newInterval: number;
+    const newEasinessFactor = Math.max(1.3, card.easinessFactor + (0.1 - (5 - q) * (0.08 + (5 - q) * 0.02)));
+
+    if (card.repetitions === 0) {
+        newRepetitions = 1;
+        newInterval = 1;
+    } else if (card.repetitions === 1) {
+        newRepetitions = 2;
+        newInterval = 6;
+    } else {
+        newRepetitions = card.repetitions + 1;
+        newInterval = Math.ceil(card.interval * card.easinessFactor);
     }
-  }, [key, state]);
 
-  return [state, setState];
+    return {
+        repetitions: newRepetitions,
+        easinessFactor: newEasinessFactor,
+        interval: newInterval,
+        dueDate: calculateNextDueDate(newInterval).toISOString(),
+    };
 };
 
-// --- UTILITY FUNCTIONS ---
-const getTodaysDateString = () => {
-  const today = new Date();
-  return new Date(today.getFullYear(), today.getMonth(), today.getDate()).toISOString().split('T')[0];
+
+const getAffinityClassName = (repetitions: number): string => {
+    if (repetitions === 0) return 'affinity-low'; // New or failed cards
+    if (repetitions <= 4) return 'affinity-mid'; // Learning cards
+    return 'affinity-high'; // Well-known cards
 };
 
-const addDays = (dateStr: string, days: number): string => {
-  const date = new Date(dateStr);
-  date.setDate(date.getDate() + days);
-  return date.toISOString().split('T')[0];
+const requestNotificationPermission = async (): Promise<NotificationPermissionStatus> => {
+    if (!('Notification' in window)) return 'unsupported';
+    return await Notification.requestPermission();
 };
 
-const calculateAffinity = (card: Card) => {
-    if (card.repetitions > 5 || card.interval > 30) return 'high';
-    if (card.repetitions > 2 || card.interval > 7) return 'mid';
-    return 'low';
+const scheduleNotification = () => {
+    if (!('Notification' in window) || Notification.permission !== 'granted' || !('serviceWorker' in navigator)) {
+        return;
+    }
+    
+    navigator.serviceWorker.ready.then(registration => {
+        const tomorrow = new Date();
+        tomorrow.setDate(tomorrow.getDate() + 1);
+        tomorrow.setHours(10, 0, 0, 0); // 10 AM tomorrow
+        
+        const delay = tomorrow.getTime() - Date.now();
+        
+        if (delay > 0 && registration.active) {
+            registration.active.postMessage({
+                type: 'SCHEDULE_NOTIFICATION',
+                payload: {
+                    delay,
+                    title: 'Hora de estudar Japonês!',
+                    options: {
+                        body: 'Suas cartas estão esperando por você. 頑張って!',
+                        lang: 'pt-BR',
+                        icon: '/icon.svg',
+                        badge: '/icon.svg',
+                        vibrate: [100, 50, 100],
+                        tag: 'gaku-study-reminder',
+                        requireInteraction: true,
+                        actions: [
+                            { action: 'open_app', title: 'Abrir App' }
+                        ]
+                    }
+                }
+            });
+            console.log(`Notification scheduled via Service Worker for ${tomorrow}`);
+        }
+    });
 };
 
+const playFeedbackSound = (type: FeedbackType) => {
+    try {
+        const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+        if (!audioContext) return;
+
+        const oscillator = audioContext.createOscillator();
+        const gainNode = audioContext.createGain();
+
+        oscillator.connect(gainNode);
+        gainNode.connect(audioContext.destination);
+
+        gainNode.gain.setValueAtTime(0, audioContext.currentTime);
+        gainNode.gain.linearRampToValueAtTime(0.3, audioContext.currentTime + 0.01);
+
+        if (type === 'again') {
+            oscillator.type = 'sawtooth';
+            oscillator.frequency.setValueAtTime(160, audioContext.currentTime);
+        } else if (type === 'good') {
+            oscillator.type = 'sine';
+            oscillator.frequency.setValueAtTime(440, audioContext.currentTime);
+        } else { // easy
+            oscillator.type = 'sine';
+            oscillator.frequency.setValueAtTime(523, audioContext.currentTime);
+            gainNode.gain.linearRampToValueAtTime(0.4, audioContext.currentTime + 0.01); 
+        }
+
+        oscillator.start(audioContext.currentTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.00001, audioContext.currentTime + 0.25);
+        oscillator.stop(audioContext.currentTime + 0.25);
+
+    } catch (e) {
+        console.error("Could not play sound", e);
+    }
+};
+
+// --- INITIAL DATA ---
+const getInitialCards = (): Card[] => {
+    const today = new Date().toISOString();
+    const initialSrsState = { repetitions: 0, easinessFactor: 2.5, interval: 0, dueDate: today };
+    return [
+      { id: 1, front: 'こんにちは', back: 'Olá', category: 'Vocabulário Básico', ...initialSrsState },
+      { id: 2, front: 'ありがとう', back: 'Obrigado(a)', category: 'Vocabulário Básico', ...initialSrsState },
+      { id: 3, front: 'はい', back: 'Sim', category: 'Vocabulário Básico', ...initialSrsState },
+      { id: 4, front: 'いいえ', back: 'Não', category: 'Vocabulário Básico', ...initialSrsState },
+      { id: 5, front: '日本', back: 'Japão', category: 'Kanji', ...initialSrsState },
+    ];
+};
 
 // --- UI COMPONENTS ---
-
-const Loader = ({ small = false, className = '' }: { small?: boolean; className?: string }) => (
-  <div className={`loader ${small ? 'small' : ''} ${className}`} />
+const Loader: React.FC<{ isSmall?: boolean }> = ({ isSmall = false }) => (
+    <div className={isSmall ? '' : "loader-overlay"}>
+        <div className={`loader ${isSmall ? 'small' : ''}`}></div>
+    </div>
 );
 
-const IconButton = React.forwardRef<HTMLButtonElement, React.ButtonHTMLAttributes<HTMLButtonElement>>(
-  ({ children, className, ...props }, ref) => (
-    <button ref={ref} className={`icon-btn ${className}`} {...props}>
-      {children}
+const DarkModeToggle: React.FC<{ theme: Theme; toggleTheme: () => void }> = ({ theme, toggleTheme }) => (
+    <button onClick={toggleTheme} className="icon-btn" aria-label={`Ativar modo ${theme === 'light' ? 'escuro' : 'claro'}`}>
+        {theme === 'light' ? <MoonIcon /> : <SunIcon />}
     </button>
-  )
 );
 
-const Button = React.forwardRef<HTMLButtonElement, React.ButtonHTMLAttributes<HTMLButtonElement> & { variant?: 'primary' | 'outline' | 'destructive' | 'cancel' | 'link' }>(
-  ({ children, className, variant = 'primary', ...props }, ref) => {
-    const variantClasses = {
-      primary: '',
-      outline: 'btn-outline',
-      destructive: 'btn-destructive',
-      cancel: 'btn-cancel',
-      link: 'btn-link',
+const StatsButton: React.FC<{ onClick: () => void }> = ({ onClick }) => (
+    <button onClick={onClick} className="icon-btn" aria-label="Ver estatísticas" id="header-stats-btn">
+        <BarChartIcon />
+    </button>
+);
+
+const NavBar: React.FC<{
+    currentView: View;
+    onNavigate: (view: View) => void;
+    reviewCount: number;
+}> = ({ currentView, onNavigate, reviewCount }) => (
+    <nav className="main-nav">
+        <button onClick={() => onNavigate('review')} className={`nav-btn ${currentView === 'review' ? 'active' : ''}`} aria-label="Revisar" id="nav-review">
+            <div className="nav-badge-container">
+                <EyeIcon />
+                {reviewCount > 0 && <span className="nav-badge">{reviewCount}</span>}
+            </div>
+            <span>Revisar</span>
+        </button>
+        <button onClick={() => onNavigate('decks')} className={`nav-btn ${currentView === 'decks' ? 'active' : ''}`} aria-label="Baralhos" id="nav-decks">
+            <ListIcon />
+            <span>Baralhos</span>
+        </button>
+        <button onClick={() => onNavigate('add')} className="nav-btn nav-btn-add" aria-label="Adicionar carta" id="nav-add">
+            <PlusIcon />
+            <span>Adicionar</span>
+        </button>
+        <button id="nav-community" onClick={() => onNavigate('community')} className={`nav-btn ${currentView === 'community' ? 'active' : ''}`} aria-label="Comunidade">
+            <GlobeIcon />
+            <span>Comunidade</span>
+        </button>
+        <button onClick={() => onNavigate('settings')} className={`nav-btn ${currentView === 'settings' ? 'active' : ''}`} aria-label="Configurações">
+            <SettingsIcon />
+            <span>Ajustes</span>
+        </button>
+    </nav>
+);
+
+const Flashcard: React.FC<{
+    card: Card;
+    isFlipped: boolean;
+    onFlip: () => void;
+    feedbackState: string;
+    onSwipe: (direction: 'left' | 'right' | 'up') => void;
+    mode: 'review' | 'practice';
+}> = ({ card, isFlipped, onFlip, feedbackState, onSwipe, mode }) => {
+    const frontEl = useRef<HTMLDivElement>(null);
+    const backEl = useRef<HTMLDivElement>(null);
+    const [frontHasScroll, setFrontHasScroll] = useState(false);
+    const [backHasScroll, setBackHasScroll] = useState(false);
+    const cardRef = useRef<HTMLDivElement>(null);
+
+    // --- State for gesture detection ---
+    const pointerStartRef = useRef({ x: 0, y: 0, time: 0 });
+    const isInteracting = useRef(false);
+
+    const getFontSizeClass = (text: string) => {
+        const len = text.length;
+        if (len <= 15) return 'text-size-large';
+        if (len <= 80) return 'text-size-medium';
+        return 'text-size-small';
     };
+
+    useLayoutEffect(() => {
+        if (frontEl.current) {
+            setFrontHasScroll(frontEl.current.scrollHeight > frontEl.current.clientHeight);
+        }
+        if (backEl.current) {
+            setBackHasScroll(backEl.current.scrollHeight > backEl.current.clientHeight);
+        }
+    }, [card, isFlipped]);
+
+    const handleInteractionStart = (clientX: number, clientY: number) => {
+        isInteracting.current = true;
+        pointerStartRef.current = {
+            x: clientX,
+            y: clientY,
+            time: Date.now()
+        };
+    };
+
+    const handleTouchStart = (e: React.TouchEvent) => {
+        handleInteractionStart(e.touches[0].clientX, e.touches[0].clientY);
+        const allowSwipeViz = (mode === 'review' && isFlipped) || (mode === 'practice' && !isFlipped);
+        if (allowSwipeViz && cardRef.current) {
+            cardRef.current.classList.add('is-swiping');
+        }
+    };
+    
+    const handleTouchMove = (e: React.TouchEvent) => {
+        if (!isInteracting.current) return;
+        
+        const allowSwipeViz = (mode === 'review' && isFlipped) || (mode === 'practice' && !isFlipped);
+        if (!allowSwipeViz) return;
+
+        const diffX = e.touches[0].clientX - pointerStartRef.current.x;
+        if (cardRef.current) {
+            cardRef.current.style.transform = `translateX(${diffX}px)`;
+        }
+    };
+
+    const handleTouchEnd = (e: React.TouchEvent) => {
+        if (!isInteracting.current) return;
+        isInteracting.current = false;
+        
+        if (cardRef.current) {
+            cardRef.current.classList.remove('is-swiping');
+            cardRef.current.style.transform = '';
+        }
+    
+        const touchEnd = { x: e.changedTouches[0].clientX, y: e.changedTouches[0].clientY };
+        const duration = Date.now() - pointerStartRef.current.time;
+        const diffX = touchEnd.x - pointerStartRef.current.x;
+        const diffY = touchEnd.y - pointerStartRef.current.y;
+
+        // TAP LOGIC
+        if (duration < 300 && Math.abs(diffX) < 10 && Math.abs(diffY) < 10) {
+            onFlip();
+            return; 
+        }
+        
+        // SWIPE LOGIC
+        const swipeThreshold = 60;
+        const isHorizontalSwipe = Math.abs(diffX) > Math.abs(diffY) * 1.5;
+        const isVerticalSwipe = mode === 'review' && Math.abs(diffY) > Math.abs(diffX) * 1.5;
+
+        const canSwipe = (mode === 'review' && isFlipped) || (mode === 'practice' && !isFlipped);
+        
+        if (canSwipe) {
+            if (isHorizontalSwipe) {
+                if (diffX < -swipeThreshold) onSwipe('left');
+                else if (diffX > swipeThreshold) onSwipe('right');
+            } else if (isVerticalSwipe) { // Only relevant for review mode
+                if (diffY < -swipeThreshold) onSwipe('up');
+            }
+        }
+    };
+
+    // --- Mouse handlers for desktop click ---
+    const handleMouseDown = (e: React.MouseEvent) => {
+        if (e.button !== 0) return; // Only main button
+        // Do not handle mouse events on touch devices to prevent double firing
+        if ('ontouchstart' in window || navigator.maxTouchPoints > 0) return;
+        handleInteractionStart(e.clientX, e.clientY);
+    };
+
+    const handleMouseUp = (e: React.MouseEvent) => {
+        if ('ontouchstart' in window || navigator.maxTouchPoints > 0 || !isInteracting.current) return;
+        isInteracting.current = false;
+        
+        const duration = Date.now() - pointerStartRef.current.time;
+        const diffX = e.clientX - pointerStartRef.current.x;
+        const diffY = e.clientY - pointerStartRef.current.y;
+
+        // CLICK LOGIC
+        if (duration < 300 && Math.abs(diffX) < 10 && Math.abs(diffY) < 10) {
+            onFlip();
+        }
+    };
+
+    const handleMouseLeave = () => {
+        // Cancel interaction if mouse leaves while pressed
+        if (isInteracting.current) {
+            isInteracting.current = false;
+        }
+    };
+
+
     return (
-      <button ref={ref} className={`btn ${variantClasses[variant]} ${className}`} {...props}>
-        {children}
-      </button>
+        <div 
+            className={`flashcard-container ${feedbackState}`}
+            onTouchStart={handleTouchStart}
+            onTouchMove={handleTouchMove}
+            onTouchEnd={handleTouchEnd}
+            onMouseDown={handleMouseDown}
+            onMouseUp={handleMouseUp}
+            onMouseLeave={handleMouseLeave}
+            ref={cardRef}
+        >
+            <div className={`flashcard ${isFlipped ? 'is-flipped' : ''}`}>
+                <div className="flashcard-face flashcard-front">
+                    <div ref={frontEl} className={`${getFontSizeClass(card.front)} ${frontHasScroll ? 'has-scroll-indicator' : ''}`}>{card.front}</div>
+                </div>
+                <div className="flashcard-face flashcard-back">
+                    <div ref={backEl} className={`${getFontSizeClass(card.back)} ${backHasScroll ? 'has-scroll-indicator' : ''}`}>{card.back}</div>
+                </div>
+            </div>
+            <div className="feedback-icon-overlay">
+                {feedbackState === 'feedback-again' && <XIcon />}
+                {feedbackState === 'feedback-good' && <CheckIcon />}
+                {feedbackState === 'feedback-easy' && <StarIcon />}
+            </div>
+        </div>
     );
-  }
-);
+};
 
+const Controls: React.FC<{
+    isFlipped: boolean;
+    onShowAnswer: () => void;
+    onFeedback: (quality: FeedbackType) => void;
+    progressText: string;
+}> = ({ isFlipped, onShowAnswer, onFeedback, progressText }) => {
+    return (
+        <div className="controls">
+            <div className="progress">{progressText}</div>
+            {isFlipped ? (
+                <div className="srs-buttons">
+                    <button onClick={() => onFeedback('again')} className="btn srs-btn srs-again">Errei</button>
+                    <button onClick={() => onFeedback('good')} className="btn srs-btn srs-good">OK</button>
+                    <button onClick={() => onFeedback('easy')} className="btn srs-btn srs-easy">Fácil</button>
+                </div>
+            ) : (
+                <button onClick={onShowAnswer} className="btn">Mostrar Resposta</button>
+            )}
+        </div>
+    );
+};
 
-const Modal = ({ config, closeModal }: { config: ModalConfig, closeModal: () => void }) => {
-    const [inputValue, setInputValue] = useState(config.initialValue || '');
-    const confirmButtonRef = useRef<HTMLButtonElement>(null);
+const CustomDialog: React.FC<ModalConfig & { onDismiss: () => void }> = ({
+    type, title, message, confirmText, cancelText, isDestructive, onConfirm, onCancel, onDismiss, initialValue
+}) => {
+    const [inputValue, setInputValue] = useState(initialValue || '');
+    const inputRef = useRef<HTMLInputElement>(null);
 
     useEffect(() => {
-        const handleKeyDown = (e: KeyboardEvent) => {
-            if (e.key === 'Escape') closeModal();
-            if (e.key === 'Enter' && config.type !== 'prompt') {
-                confirmButtonRef.current?.click();
-            }
-        };
-        window.addEventListener('keydown', handleKeyDown);
-        return () => window.removeEventListener('keydown', handleKeyDown);
-    }, [closeModal, config.type]);
+        if (type === 'prompt' && inputRef.current) {
+            inputRef.current.focus();
+        }
+    }, [type]);
 
     const handleConfirm = () => {
-        config.onConfirm(inputValue);
-        closeModal();
+        onConfirm(inputValue);
+        onDismiss();
     };
 
     const handleCancel = () => {
-        if (config.onCancel) config.onCancel();
-        closeModal();
+        if (onCancel) onCancel();
+        onDismiss();
+    };
+    
+    const handleKeyDown = (e: React.KeyboardEvent) => {
+        // Do not handle Enter key if the target is the dialog's select input
+        if (e.key === 'Enter' && (e.target as HTMLElement).tagName !== 'SELECT') {
+            if (type === 'prompt' && !inputValue.trim()) return;
+            handleConfirm();
+        } else if (e.key === 'Escape') {
+            handleCancel();
+        }
     };
 
     return (
         <div className="modal-overlay" onClick={handleCancel}>
-            <div className="custom-dialog-content" onClick={(e) => e.stopPropagation()}>
-                <h3>{config.title}</h3>
-                <div className="custom-dialog-message">{config.message}</div>
-                {config.type === 'prompt' && (
+            <div className="custom-dialog-content" onClick={(e) => e.stopPropagation()} onKeyDown={handleKeyDown}>
+                <h3>{title}</h3>
+                <div className="custom-dialog-message">{message}</div>
+                {type === 'prompt' && (
                     <input
+                        ref={inputRef}
                         type="text"
                         value={inputValue}
                         onChange={(e) => setInputValue(e.target.value)}
-                        autoFocus
+                        placeholder="Nome do baralho..."
                     />
                 )}
                 <div className="dialog-actions">
-                    <Button variant="cancel" onClick={handleCancel}>
-                        {config.cancelText || 'Cancelar'}
-                    </Button>
-                    <Button
-                        ref={confirmButtonRef}
-                        variant={config.isDestructive ? 'destructive' : 'primary'}
+                    <button onClick={handleCancel} className="btn btn-cancel">
+                        {cancelText || 'Cancelar'}
+                    </button>
+                    <button
                         onClick={handleConfirm}
+                        className={`btn ${isDestructive ? 'btn-destructive' : ''}`}
+                        disabled={type === 'prompt' && !inputValue.trim()}
                     >
-                        {config.confirmText || 'Confirmar'}
-                    </Button>
+                        {confirmText || 'Confirmar'}
+                    </button>
                 </div>
             </div>
         </div>
     );
 };
 
-// --- FLASHCARD COMPONENT ---
-interface FlashcardProps {
-  frontContent: React.ReactNode;
-  backContent: React.ReactNode;
-  isFlipped: boolean;
-  onFlip: () => void;
-  onFeedback?: (type: FeedbackType) => void;
-  mode?: 'review' | 'practice';
-}
-
-const Flashcard = ({ frontContent, backContent, isFlipped, onFlip, onFeedback, mode = 'review' }: FlashcardProps) => {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const frontContentRef = useRef<HTMLDivElement>(null);
-  const backContentRef = useRef<HTMLDivElement>(null);
-  const [frontTextSize, setFrontTextSize] = useState('text-size-medium');
-  const [backTextSize, setBackTextSize] = useState('text-size-medium');
-  const [showFrontScroll, setShowFrontScroll] = useState(false);
-  const [showBackScroll, setShowBackScroll] = useState(false);
-
-  // Swipe gesture state
-  const swipeStartX = useRef(0);
-  const swipeCurrentX = useRef(0);
-  const isSwiping = useRef(false);
-  const swipeThreshold = 50; // pixels
-
-  // Tap vs Swipe state
-  const touchStartTime = useRef(0);
-  const touchStartPos = useRef({ x: 0, y: 0 });
-  const tapThreshold = 10; // pixels
-  const tapTimeThreshold = 200; // ms
-
-  const adjustTextSize = (ref: React.RefObject<HTMLDivElement>, setTextSize: (size: string) => void) => {
-    const el = ref.current;
-    if (!el) return;
-    const contentLength = el.textContent?.length || 0;
-    if (contentLength <= 20) setTextSize('text-size-large');
-    else if (contentLength <= 100) setTextSize('text-size-medium');
-    else setTextSize('text-size-small');
-  };
-  
-  const checkScroll = (ref: React.RefObject<HTMLDivElement>, setShowScroll: (show: boolean) => void) => {
-    const el = ref.current;
-    if (el) {
-        setShowScroll(el.scrollHeight > el.clientHeight);
-    }
-  };
-
-  useLayoutEffect(() => {
-    adjustTextSize(frontContentRef, setFrontTextSize);
-    adjustTextSize(backContentRef, setBackTextSize);
-    checkScroll(frontContentRef, setShowFrontScroll);
-    checkScroll(backContentRef, setShowBackScroll);
-  }, [frontContent, backContent]);
-  
-  const handleTouchStart = (e: React.TouchEvent) => {
-    touchStartTime.current = Date.now();
-    touchStartPos.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
-    
-    if ((mode === 'review' && isFlipped) || mode === 'practice') {
-      swipeStartX.current = e.touches[0].clientX;
-      swipeCurrentX.current = e.touches[0].clientX;
-      isSwiping.current = true;
-      if (containerRef.current) {
-        containerRef.current.classList.add('is-swiping');
-      }
-    }
-  };
-
-  const handleTouchMove = (e: React.TouchEvent) => {
-    if (!isSwiping.current) return;
-    swipeCurrentX.current = e.touches[0].clientX;
-    const diff = swipeCurrentX.current - swipeStartX.current;
-
-    if (containerRef.current) {
-      containerRef.current.style.transform = `translateX(${diff}px)`;
-    }
-  };
-
-  const handleTouchEnd = () => {
-    const touchEndTime = Date.now();
-    const movedX = Math.abs(touchStartPos.current.x - swipeCurrentX.current);
-    const movedY = Math.abs(touchStartPos.current.y - (isSwiping.current ? swipeCurrentX.current : touchStartPos.current.y));
-
-    if (touchEndTime - touchStartTime.current < tapTimeThreshold && movedX < tapThreshold && movedY < tapThreshold) {
-      onFlip(); // It's a tap
-      if (isSwiping.current) {
-         resetSwipe();
-      }
-      return;
-    }
-
-    if (!isSwiping.current) return;
-
-    const diff = swipeCurrentX.current - swipeStartX.current;
-
-    if (onFeedback && Math.abs(diff) > swipeThreshold) {
-      if (diff < 0) onFeedback('again'); // Swipe left
-      else onFeedback('good');           // Swipe right
-    } else {
-      resetSwipe();
-    }
-    
-    isSwiping.current = false;
-  };
-
-  const handleMouseDown = (e: React.MouseEvent) => {
-      // Ignore if it's a touch device
-      if ('ontouchstart' in window) return;
-
-      touchStartTime.current = Date.now();
-      touchStartPos.current = { x: e.clientX, y: e.clientY };
-  };
-
-  const handleMouseUp = (e: React.MouseEvent) => {
-      // Ignore if it's a touch device
-      if ('ontouchstart' in window) return;
-
-      const touchEndTime = Date.now();
-      const movedX = Math.abs(touchStartPos.current.x - e.clientX);
-      const movedY = Math.abs(touchStartPos.current.y - e.clientY);
-
-      if (touchEndTime - touchStartTime.current < tapTimeThreshold && movedX < tapThreshold && movedY < tapThreshold) {
-          onFlip();
-      }
-  };
-
-  const resetSwipe = () => {
-    if (containerRef.current) {
-      containerRef.current.classList.remove('is-swiping');
-      containerRef.current.style.transform = 'translateX(0)';
-    }
-  };
-
-  useEffect(() => {
-    if (!isFlipped && mode === 'review') {
-        resetSwipe();
-    }
-  }, [isFlipped, mode]);
-
-
-  return (
-    <div
-      className="flashcard-container"
-      ref={containerRef}
-      onTouchStart={handleTouchStart}
-      onTouchMove={handleTouchMove}
-      onTouchEnd={handleTouchEnd}
-      onMouseDown={handleMouseDown}
-      onMouseUp={handleMouseUp}
-    >
-      <div className={`flashcard ${isFlipped ? 'is-flipped' : ''}`}>
-        <div className="flashcard-face flashcard-front">
-          <div ref={frontContentRef} className={`${frontTextSize} ${showFrontScroll ? 'has-scroll-indicator' : ''}`}>
-            {frontContent}
-          </div>
-        </div>
-        <div className="flashcard-face flashcard-back">
-          <div ref={backContentRef} className={`${backTextSize} ${showBackScroll ? 'has-scroll-indicator' : ''}`}>
-            {backContent}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-};
-
-
-// --- VIEWS ---
-
-const WelcomeEmptyState = ({ onCreateDeck }: { onCreateDeck: () => void }) => (
-    <div className="empty-state-container">
-        <ListIcon />
-        <h3>Bem-vindo ao Gaku!</h3>
-        <p>Parece que você ainda não tem baralhos. Crie um para começar a adicionar seus flashcards e iniciar seus estudos.</p>
-        <Button onClick={onCreateDeck}>
-            <PlusIcon />
-            Criar Meu Primeiro Baralho
-        </Button>
-    </div>
-);
-
-
-const SessionComplete = ({ onSeeDecks, onAddCards }: { onSeeDecks: () => void, onAddCards: () => void }) => {
-    return (
-      <div className="session-complete">
-        <h2>Parabéns!</h2>
-        <p>Você revisou todas as cartas por hoje.</p>
-        <div className="session-complete-actions">
-          <Button onClick={onSeeDecks}><ListIcon /> Ver Baralhos</Button>
-          <Button onClick={onAddCards} variant="outline"><PlusIcon /> Adicionar Cartas</Button>
-        </div>
-      </div>
-    );
-};
-
-const ReviewView = ({ cards, onFeedback, onSessionComplete, onCreateDeck, decksExist }: { cards: Card[], onFeedback: (card: Card, feedback: FeedbackType) => void, onSessionComplete: () => void, onCreateDeck: () => void, decksExist: boolean }) => {
-  const [currentIndex, setCurrentIndex] = useState(0);
-  const [isFlipped, setIsFlipped] = useState(false);
-  const [feedbackAnimation, setFeedbackAnimation] = useState('');
-  const [feedbackIcon, setFeedbackIcon] = useState<React.ReactNode>(null);
-
-  const currentCard = cards[currentIndex];
-
-  useEffect(() => {
-      if (cards.length > 0 && currentIndex >= cards.length) {
-          onSessionComplete();
-      }
-  }, [currentIndex, cards.length, onSessionComplete]);
-  
-  if (!decksExist) {
-    return <WelcomeEmptyState onCreateDeck={onCreateDeck} />;
-  }
-
-  if (!currentCard) {
-    return <SessionComplete onSeeDecks={onSessionComplete} onAddCards={onCreateDeck} />;
-  }
-  
-  const handleFeedback = (type: FeedbackType) => {
-    if (!isFlipped) return;
-    
-    let animationClass = '';
-    let icon = null;
-    if (type === 'again') {
-        animationClass = 'feedback-again';
-        icon = <XIcon />;
-    } else if (type === 'good') {
-        animationClass = 'feedback-good';
-        icon = <CheckIcon />;
-    } else {
-        animationClass = 'feedback-easy';
-        icon = <StarIcon />;
-    }
-    setFeedbackAnimation(animationClass);
-    setFeedbackIcon(icon);
-    
-    setTimeout(() => {
-      onFeedback(currentCard, type);
-      setIsFlipped(false);
-      setFeedbackAnimation('');
-      setFeedbackIcon(null);
-      // Only advance if it wasn't 'again'
-      if (type !== 'again') {
-          setCurrentIndex(i => i + 1);
-      } else {
-          // Move 'again' card to the back of the review queue (simple approach)
-          // A more robust implementation might re-insert it a few cards away.
-      }
-    }, 600);
-  };
-  
-  const handleFlip = () => {
-    trackEvent('flip_card', {
-        type: 'review',
-        direction: isFlipped ? 'back_to_front' : 'front_to_back',
-        card_id: currentCard.id
-    });
-    setIsFlipped(!isFlipped);
-  }
-
-  return (
-    <div className="review-view">
-      <div className={`feedback-wrapper ${feedbackAnimation}`}>
-        <div className="feedback-icon-overlay">{feedbackIcon}</div>
-        <Flashcard
-          frontContent={currentCard.front}
-          backContent={currentCard.back}
-          isFlipped={isFlipped}
-          onFlip={handleFlip}
-          onFeedback={handleFeedback}
-          mode="review"
-        />
-      </div>
-
-      <div className="controls">
-        <div className="progress">{currentIndex + 1} / {cards.length}</div>
-        {isFlipped ? (
-          <div className="srs-buttons">
-            <Button className="srs-btn srs-again" onClick={() => handleFeedback('again')}>Errei</Button>
-            <Button className="srs-btn srs-good" onClick={() => handleFeedback('good')}>OK</Button>
-            <Button className="srs-btn srs-easy" onClick={() => handleFeedback('easy')}>Fácil</Button>
-          </div>
-        ) : (
-          <Button onClick={handleFlip}>Mostrar Resposta</Button>
-        )}
-      </div>
-    </div>
-  );
-};
-
-const AddCardView = ({ onSave, decks, initialDeck, onBulkAdd, onBack }: { onSave: (card: Card) => void; decks: DeckInfo[], initialDeck: string | null; onBulkAdd: (deckName: string) => void, onBack: () => void; }) => {
+const AddCardForm: React.FC<{
+    onAddCard: (card: Omit<Card, 'id'>) => void;
+    onEditCard: (card: Card) => void;
+    onDeleteCard?: (id: number) => void;
+    existingCategories: string[];
+    editingCard?: Card | null;
+    onDone: () => void;
+    onNavigate: (view: View) => void;
+}> = ({ onAddCard, onEditCard, onDeleteCard, existingCategories, editingCard, onDone, onNavigate }) => {
     const [front, setFront] = useState('');
     const [back, setBack] = useState('');
-    const [category, setCategory] = useState(initialDeck || (decks[0]?.name || ''));
-    const [newCategory, setNewCategory] = useState('');
+    const [category, setCategory] = useState('');
+    const [showInstructions, setShowInstructions] = useState(true);
+    const formRef = useRef<HTMLFormElement>(null);
 
-    const handleSubmit = (e: React.FormEvent) => {
+    useEffect(() => {
+        if (editingCard) {
+            setFront(editingCard.front);
+            setBack(editingCard.back);
+            setCategory(editingCard.category);
+            setShowInstructions(false);
+        } else {
+            // Reset form for new card
+            setFront('');
+            setBack('');
+            setCategory(sessionStorage.getItem('gaku-last-category') || existingCategories[0] || '');
+        }
+    }, [editingCard, existingCategories]);
+    
+    const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
-        const finalCategory = category === '__new__' ? newCategory.trim() : category;
-        if (!front.trim() || !back.trim() || !finalCategory) {
+        const categoryTrimmed = category.trim();
+        if (!front.trim() || !back.trim() || !categoryTrimmed) {
             alert('Por favor, preencha todos os campos.');
             return;
         }
         
-        const newCard: Card = {
-            id: Date.now(),
-            front: front.trim(),
-            back: back.trim(),
-            category: finalCategory,
-            repetitions: 0,
-            easinessFactor: 2.5,
-            interval: 0,
-            dueDate: getTodaysDateString(),
-        };
-        onSave(newCard);
-        setFront('');
-        setBack('');
-        // Focus front for next card
-        document.getElementById('front-input')?.focus();
+        sessionStorage.setItem('gaku-last-category', categoryTrimmed);
+        const today = new Date().toISOString();
+
+        if (editingCard) {
+            onEditCard({ ...editingCard, front, back, category: categoryTrimmed });
+        } else {
+            onAddCard({
+                front,
+                back,
+                category: categoryTrimmed,
+                repetitions: 0,
+                easinessFactor: 2.5,
+                interval: 0,
+                dueDate: today,
+            });
+             // Animate and clear for next card
+            if(formRef.current) {
+                formRef.current.classList.add('new-card-animation');
+                setTimeout(() => formRef.current?.classList.remove('new-card-animation'), 1500);
+            }
+            setFront('');
+            setBack('');
+            // Keep category for faster additions
+            (document.getElementById('front-input') as HTMLInputElement)?.focus();
+        }
+
+        if (editingCard) {
+            onDone();
+        }
     };
 
+    const handleDelete = () => {
+        if (editingCard && onDeleteCard) {
+            onDeleteCard(editingCard.id);
+            onDone();
+        }
+    };
+    
     return (
-        <div className="add-card-view">
+        <div className={editingCard ? "edit-card-form" : "add-card-view"}>
             <div className="add-card-view-header">
-              <h2>Adicionar Cartão</h2>
-              <Button variant="link" onClick={() => onBulkAdd(category)}>
-                Adicionar em Massa
-              </Button>
+                <h2>{editingCard ? 'Editar Carta' : 'Adicionar Nova Carta'}</h2>
+                {editingCard ? (
+                     <button onClick={onDone} className="btn-link">Cancelar</button>
+                ) : (
+                     <button onClick={() => onNavigate('bulk-add')} className="btn-link">
+                       Adicionar em Massa
+                    </button>
+                )}
             </div>
-            <form onSubmit={handleSubmit} className="add-card-form">
-                <div className="form-group">
-                    <label htmlFor="front-input">Frente</label>
-                    <textarea id="front-input" value={front} onChange={e => setFront(e.target.value)} required />
-                </div>
-                <div className="form-group">
-                    <label htmlFor="back-input">Verso</label>
-                    <textarea id="back-input" value={back} onChange={e => setBack(e.target.value)} required />
-                </div>
-                <div className="form-group">
-                    <label htmlFor="category-select">Baralho</label>
-                    <select id="category-select" value={category} onChange={e => setCategory(e.target.value)}>
-                        {decks.map(deck => <option key={deck.name} value={deck.name}>{deck.name}</option>)}
-                        <option value="__new__">-- Novo Baralho --</option>
-                    </select>
-                </div>
-                {category === '__new__' && (
-                    <div className="form-group">
-                        <label htmlFor="new-category-input">Nome do Novo Baralho</label>
-                        <input
-                            id="new-category-input"
-                            type="text"
-                            value={newCategory}
-                            onChange={e => setNewCategory(e.target.value)}
-                            required
-                        />
+
+            <form onSubmit={handleSubmit} ref={formRef} className={editingCard ? "" : "add-card-form"}>
+                 {showInstructions && !editingCard && (
+                    <div className="form-instructions">
+                       <strong>Dica:</strong> Para criar um novo baralho, basta digitar um nome que ainda não existe no campo <code>Categoria</code>.
                     </div>
                 )}
-                <Button type="submit">
-                  <PlusIcon/> Salvar Cartão
-                </Button>
+                <div className="form-group">
+                    <label htmlFor="front">Frente</label>
+                    <textarea id="front-input" value={front} onChange={e => setFront(e.target.value)} placeholder="ex: 日本" required />
+                </div>
+                <div className="form-group">
+                    <label htmlFor="back">Verso</label>
+                    <textarea value={back} onChange={e => setBack(e.target.value)} placeholder="ex: Japão" required />
+                </div>
+                <div className="form-group">
+                    <div className="form-group-header">
+                        <label htmlFor="category">Categoria (Baralho)</label>
+                         <button type="button" onClick={() => onNavigate('decks')} className="btn-link">Gerenciar Baralhos</button>
+                    </div>
+                    <input
+                        id="category"
+                        list="category-list"
+                        value={category}
+                        onChange={e => setCategory(e.target.value)}
+                        placeholder="ex: Kanji N5"
+                        required
+                    />
+                    <datalist id="category-list">
+                        {existingCategories.map(cat => <option key={cat} value={cat} />)}
+                    </datalist>
+                </div>
+                <button type="submit" className="btn">
+                    {editingCard ? 'Salvar Alterações' : 'Adicionar Carta'}
+                </button>
+                {editingCard && onDeleteCard && (
+                    <button type="button" onClick={handleDelete} className="btn-delete">
+                        <TrashIcon/> Apagar Carta
+                    </button>
+                )}
             </form>
         </div>
     );
 };
 
-const DecksView = ({ cards, decks, onSaveCard, onDeleteCard, onSaveDeck, onDeleteDeck, onRenameDeck, onMoveCard, onBulkAdd, onPractice, onShareDeck }) => {
-    const [editingCard, setEditingCard] = useState<Card | null>(null);
-    const [viewingDeck, setViewingDeck] = useState<string | null>(null);
-    const [practiceMode, setPracticeMode] = useState(false);
-    
-    const [itemToDelete, setItemToDelete] = useState<{ type: 'card' | 'deck', id: number | string } | null>(null);
+const BulkAddView: React.FC<{
+    onBulkAdd: (cards: Omit<Card, 'id' | 'repetitions' | 'easinessFactor' | 'interval' | 'dueDate'>[]) => void;
+    onNavigate: (view: View) => void;
+    existingCategories: string[];
+}> = ({ onBulkAdd, onNavigate, existingCategories }) => {
+    const [text, setText] = useState('');
+    const [defaultDeck, setDefaultDeck] = useState(sessionStorage.getItem('gaku-last-category') || existingCategories[0] || '');
 
-    const handleViewDeck = (deckName: string) => {
-        trackEvent('view_deck', { deck_name: deckName });
-        setViewingDeck(deckName);
-    };
+    const handleSubmit = () => {
+        const lines = text.trim().split('\n');
+        const newCardsData: Omit<Card, 'id' | 'repetitions' | 'easinessFactor' | 'interval' | 'dueDate'>[] = [];
+        const errors: string[] = [];
 
-    const handleBackToDecks = () => {
-        trackEvent('navigate', { to_view: 'deck_list', from_view: 'card_list' });
-        setViewingDeck(null);
-        setPracticeMode(false);
-    };
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i].trim();
+            if (!line) continue;
 
-    const handleSaveCardAndCloseModal = (card: Card) => {
-        onSaveCard(card);
-        setEditingCard(null);
-    };
+            const separator = line.includes(';') ? ';' : ',';
+            const parts = line.split(separator).map(p => p.trim());
+            
+            const front = parts[0];
+            const back = parts[1];
+            let category = parts.length > 2 && parts[2] ? parts[2] : defaultDeck;
 
-    const handleDeleteWithAnimation = (type: 'card' | 'deck', id: number | string) => {
-        setItemToDelete({ type, id });
-        setTimeout(() => {
-            if (type === 'card') onDeleteCard(id as number);
-            else if (type === 'deck') onDeleteDeck(id as string);
-            setItemToDelete(null);
-        }, 500);
-    };
-    
-    const startPracticeMode = () => {
-        if(viewingDeck) {
-            trackEvent('start_practice', { deck_name: viewingDeck });
-            setPracticeMode(true);
+            if (!front || !back) {
+                errors.push(`Linha ${i + 1}: Formato inválido. Precisa de 'Frente' e 'Verso'.`);
+                continue;
+            }
+            
+            if (!category.trim()) {
+                 errors.push(`Linha ${i + 1}: Categoria não especificada e nenhum baralho padrão definido.`);
+                 continue;
+            }
+
+            newCardsData.push({ front, back, category: category.trim() });
         }
-    };
-    
-    if (practiceMode && viewingDeck) {
-        const practiceCards = cards.filter(c => c.category === viewingDeck);
-        return <PracticeView
-            cards={practiceCards}
-            deckName={viewingDeck}
-            onExit={() => setPracticeMode(false)}
-        />
-    }
 
-    if (viewingDeck) {
-        return <DeckCardListView
-            deckName={viewingDeck}
-            cards={cards.filter(c => c.category === viewingDeck)}
-            onBack={handleBackToDecks}
-            onEditCard={setEditingCard}
-            onDeleteCard={(id) => handleDeleteWithAnimation('card', id)}
-            onMoveCard={onMoveCard}
-            itemToDelete={itemToDelete?.type === 'card' ? itemToDelete.id : null}
-            onPractice={startPracticeMode}
-            onBulkAdd={onBulkAdd}
-        />
+        if (errors.length > 0) {
+            alert("Erros encontrados:\n" + errors.join('\n'));
+            return;
+        }
+
+        if (newCardsData.length === 0) {
+            alert("Nenhuma carta para adicionar. Verifique o texto inserido.");
+            return;
+        }
+        
+        onBulkAdd(newCardsData);
+        alert(`${newCardsData.length} carta(s) adicionada(s) com sucesso!`);
+        onNavigate('decks');
+    };
+
+    return (
+        <div className="add-card-view">
+             <div className="add-card-view-header">
+                <h2>Adicionar Cartas</h2>
+                <button onClick={() => onNavigate('add')} className="btn-link">Adicionar uma por vez</button>
+            </div>
+            <div className="add-card-form">
+                <div className="form-instructions" style={{textAlign: 'left'}}>
+                    Adicione cartas, uma por linha, no formato:
+                    <br />
+                    <code>Frente, Verso, Nome do Baralho</code>
+                    <br />
+                    O baralho é opcional. Se não o especificar, será usado o baralho padrão abaixo. Separe com <strong>vírgula (,)</strong> ou <strong>ponto e vírgula (;)</strong>.
+                </div>
+                <div className="form-group">
+                    <label htmlFor="bulk-cards">Cartas:</label>
+                    <textarea 
+                        id="bulk-cards"
+                        value={text}
+                        onChange={e => setText(e.target.value)}
+                        placeholder={"こんにちは, Olá, Vocabulário Básico\n日本, Japão, Kanji\nありがとう, Obrigado(a)"}
+                        rows={8}
+                    />
+                </div>
+                <div className="form-group">
+                    <label htmlFor="default-deck">Baralho Padrão (se não especificado na linha):</label>
+                    <input 
+                        id="default-deck"
+                        type="text"
+                        value={defaultDeck}
+                        onChange={e => setDefaultDeck(e.target.value)}
+                        placeholder="Ex: Vocabulário Básico"
+                        list="category-list"
+                    />
+                     <datalist id="category-list">
+                       {existingCategories.map(cat => <option key={cat} value={cat} />)}
+                    </datalist>
+                </div>
+                <button onClick={handleSubmit} className="btn" disabled={!text.trim()}>Adicionar Cartas</button>
+            </div>
+        </div>
+    );
+};
+
+const DeckList: React.FC<{
+    decks: DeckInfo[];
+    onSelectDeck: (deckName: string) => void;
+    onRenameDeck: (oldName: string, newName: string) => void;
+    onDeleteDeck: (deckName: string) => void;
+    onAddNewDeck: () => void;
+    onExportDeck: (deckName: string) => void;
+    onShareDeck: (deckName: string) => void;
+}> = ({ decks, onSelectDeck, onRenameDeck, onDeleteDeck, onAddNewDeck, onExportDeck, onShareDeck }) => {
+    
+    if (decks.length === 0) {
+        return (
+            <div className="empty-state-container">
+                <ListIcon />
+                <h3>Nenhum baralho encontrado</h3>
+                <p>Crie seu primeiro baralho para começar a adicionar cartas e estudar.</p>
+                <button className="btn" onClick={onAddNewDeck}>
+                    <PlusIcon /> Criar Baralho
+                </button>
+            </div>
+        )
     }
 
     return (
         <div className="decks-view">
-            <div className="decks-view-header">
+             <div className="decks-view-header">
                 <h2>Meus Baralhos</h2>
-                <Button className="btn-add-deck" variant="link" onClick={() => onSaveDeck('')}>
-                    <PlusIcon /> Novo Baralho
-                </Button>
+                <button className="btn btn-add-deck" onClick={onAddNewDeck}>
+                    <PlusIcon/> Novo Baralho
+                </button>
             </div>
-            {decks.length > 0 ? (
-                <ul className="deck-list">
-                    {decks.map(deck => (
-                        <li key={deck.name} className={`deck-list-item ${itemToDelete?.id === deck.name ? 'is-deleting' : ''}`}>
-                            <button className="deck-item-main" onClick={() => handleViewDeck(deck.name)}>
-                                <span className="deck-name">{deck.name}</span>
-                                <span className="deck-card-count">{deck.count} carta{deck.count !== 1 ? 's' : ''}</span>
+            <ul className="deck-list">
+                {decks.map(({ name, count }) => (
+                    <li key={name} className="deck-list-item" id={`deck-item-${name.replace(/\s+/g, '-')}`}>
+                        <button className="deck-item-main" onClick={() => onSelectDeck(name)} disabled={count === 0}>
+                            <div className="deck-info">
+                                <div className="deck-name">{name}</div>
+                                <div className="deck-card-count">{count} {count === 1 ? 'carta' : 'cartas'}</div>
+                            </div>
+                            <ArrowRightIcon/>
+                        </button>
+                        <div className="deck-item-actions">
+                             <button 
+                                onClick={() => onShareDeck(name)} 
+                                className="deck-action-btn share" 
+                                title="Compartilhar com a Comunidade"
+                                disabled={count === 0}
+                            >
+                                <Share2Icon/>
                             </button>
-                            <div className="deck-item-actions">
-                               <IconButton className="share" title="Compartilhar Baralho" onClick={() => onShareDeck(deck)} disabled={deck.count === 0}>
-                                    <Share2Icon />
-                                </IconButton>
-                                <IconButton className="rename" title="Renomear Baralho" onClick={() => onRenameDeck(deck.name)}>
-                                    <PencilIcon />
-                                </IconButton>
-                                <IconButton className="delete" title="Excluir Baralho" onClick={() => handleDeleteWithAnimation('deck', deck.name)}>
-                                    <TrashIcon />
-                                </IconButton>
+                             <button 
+                                onClick={() => onExportDeck(name)} 
+                                className="deck-action-btn" 
+                                title="Exportar Baralho (CSV)"
+                                disabled={count === 0}
+                            >
+                                <FileTextIcon/>
+                            </button>
+                            <button onClick={() => onRenameDeck(name, '')} className="deck-action-btn" title="Renomear Baralho"><PencilIcon/></button>
+                            <button onClick={() => onDeleteDeck(name)} className="deck-action-btn delete" title="Apagar Baralho"><TrashIcon/></button>
+                        </div>
+                    </li>
+                ))}
+            </ul>
+        </div>
+    );
+};
+
+const DeckCardList: React.FC<{
+    deckName: string;
+    cards: Card[];
+    onBack: () => void;
+    onEditCard: (card: Card) => void;
+    onPractice: (deckName: string) => void;
+    onMoveCard: (card: Card) => void;
+}> = ({ deckName, cards, onBack, onEditCard, onPractice, onMoveCard }) => {
+    const listRef = useRef<HTMLUListElement>(null);
+    const [newCardId, setNewCardId] = useState<number | null>(null);
+
+    useLayoutEffect(() => {
+        const lastAddedCardId = sessionStorage.getItem('lastAddedCardId');
+        if (lastAddedCardId) {
+            setNewCardId(parseInt(lastAddedCardId, 10));
+            sessionStorage.removeItem('lastAddedCardId');
+            
+            const cardElement = document.getElementById(`card-item-${lastAddedCardId}`);
+            cardElement?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+            const timer = setTimeout(() => setNewCardId(null), 1500);
+            return () => clearTimeout(timer);
+        }
+    }, []);
+
+    return (
+        <div className="deck-card-list-view">
+            <div className="deck-card-list-header">
+                 <button onClick={onBack} className="back-btn" aria-label="Voltar para baralhos"><ArrowLeftIcon/></button>
+                <div className="deck-card-list-title">
+                     <h2>{deckName}</h2>
+                </div>
+                <div className="deck-card-list-actions">
+                     <button className="btn btn-practice" onClick={() => onPractice(deckName)} disabled={cards.length === 0}>
+                        <PlayIcon/> Praticar
+                    </button>
+                </div>
+            </div>
+           
+            {cards.length > 0 ? (
+                <ul className="all-cards-list" ref={listRef}>
+                    {cards.sort((a,b) => a.id - b.id).map(card => (
+                        <li 
+                            key={card.id} 
+                            id={`card-item-${card.id}`}
+                            className={`card-list-item ${getAffinityClassName(card.repetitions)} ${card.id === newCardId ? 'new-card-animation' : ''}`}
+                        >
+                            <div className="card-list-text">
+                                <span className="card-list-front">{card.front}</span>
+                                <span className="card-list-back">{card.back}</span>
+                            </div>
+                            <div className="card-list-actions">
+                                <button className="deck-action-btn move" onClick={() => onMoveCard(card)} title="Mover Carta"><ArrowRightLeftIcon/></button>
+                                <button className="edit-card-btn" onClick={() => onEditCard(card)} title="Editar Carta"><PencilIcon/></button>
                             </div>
                         </li>
                     ))}
                 </ul>
             ) : (
                  <div className="empty-deck-message">
-                    <span>Você ainda não tem baralhos.</span>
-                 </div>
+                    <span>Este baralho está vazio.</span>
+                </div>
             )}
-            
-            {editingCard && <EditCardModal card={editingCard} decks={decks} onSave={handleSaveCardAndCloseModal} onCancel={() => setEditingCard(null)} />}
         </div>
     );
-};
+}
 
-const DeckCardListView = ({ deckName, cards, onBack, onEditCard, onDeleteCard, onMoveCard, itemToDelete, onPractice, onBulkAdd }) => {
-    const [newlyAddedCardId, setNewlyAddedCardId] = useState<number | null>(null);
-    const listRef = useRef<HTMLUListElement>(null);
+const CategorySelection: React.FC<{ 
+    decks: DeckInfo[]; 
+    onSelectCategory: (category: string) => void;
+}> = ({ decks, onSelectCategory }) => (
+    <div className="category-selection-view">
+        <h2>Escolha uma categoria para revisar</h2>
+        <ul className="category-list">
+            {decks.map(({ name, count }) => (
+                <li key={name}>
+                    <button className="category-btn" onClick={() => onSelectCategory(name)}>
+                        <span>{name}</span>
+                        <span className="category-due-count">{count}</span>
+                    </button>
+                </li>
+            ))}
+        </ul>
+    </div>
+);
 
+const SessionComplete: React.FC<{ onAddMore: () => void; onGoToDecks: () => void }> = ({ onAddMore, onGoToDecks }) => {
+    const canvasRef = useRef<HTMLCanvasElement>(null);
+  
     useEffect(() => {
-        const latestCard = cards.reduce((latest, card) => (!latest || card.id > latest.id) ? card : latest, null as Card | null);
-        if (latestCard && latestCard.id !== newlyAddedCardId && !cards.find(c => c.id === newlyAddedCardId)) {
-            setNewlyAddedCardId(latestCard.id);
-            listRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        const container = canvas.parentElement;
+        if (!container) return;
 
-            const timer = setTimeout(() => {
-                setNewlyAddedCardId(null);
-            }, 2000); // Animation duration is 1.5s
-            return () => clearTimeout(timer);
+        let animationFrameId: number;
+
+        const dpr = window.devicePixelRatio || 1;
+        const rect = container.getBoundingClientRect();
+        
+        canvas.width = rect.width * dpr;
+        canvas.height = rect.height * dpr;
+        ctx.scale(dpr, dpr);
+
+        const colors = ['#fbbc05', '#4285f4', '#34a853', '#ea4335', '#00a884'];
+        
+        let confettiParticles: any[] = [];
+        const particleCount = 200;
+
+        const random = (min: number, max: number) => Math.random() * (max - min) + min;
+
+        for (let i = 0; i < particleCount; i++) {
+            confettiParticles.push({
+                x: Math.random() * rect.width,
+                y: Math.random() * rect.height - rect.height, // Start above screen
+                w: random(5, 15),
+                h: random(3, 10),
+                color: colors[Math.floor(Math.random() * colors.length)],
+                rotation: Math.random() * 360,
+                rotationSpeed: random(-7, 7),
+                ySpeed: random(2, 5),
+                opacity: 1,
+                tilt: random(-15, 15),
+                tiltAngle: 0,
+                tiltAngleSpeed: random(0.05, 0.12),
+            });
         }
-    }, [cards]);
+        
+        let particlesOnScreen = particleCount;
+
+        const render = () => {
+            if (!ctx) return;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            if (particlesOnScreen === 0) {
+                 cancelAnimationFrame(animationFrameId);
+                 return;
+            }
+
+            confettiParticles.forEach((p) => {
+                if (p.opacity <= 0) return;
+
+                ctx.save();
+                ctx.globalAlpha = p.opacity;
+                ctx.fillStyle = p.color;
+                ctx.translate(p.x + p.tilt, p.y);
+                ctx.rotate(p.rotation * Math.PI / 180);
+                ctx.fillRect(-p.w / 2, -p.h / 2, p.w, p.h);
+                ctx.restore();
+
+                p.y += p.ySpeed;
+                p.rotation += p.rotationSpeed;
+                p.tiltAngle += p.tiltAngleSpeed;
+                p.tilt = Math.sin(p.tiltAngle) * 15;
+                
+                if (p.y > rect.height) {
+                    if (p.opacity > 0) {
+                        p.opacity = 0;
+                        particlesOnScreen--;
+                    }
+                }
+            });
+
+            animationFrameId = requestAnimationFrame(render);
+        };
+
+        render();
+
+        const safetyTimeout = setTimeout(() => {
+             cancelAnimationFrame(animationFrameId);
+        }, 8000); // Stop after 8s regardless
+
+        return () => {
+            cancelAnimationFrame(animationFrameId);
+            clearTimeout(safetyTimeout);
+        };
+
+    }, []);
 
     return (
-        <div className="deck-card-list-view">
-            <div className="deck-card-list-header">
-                <IconButton className="back-btn" onClick={onBack} title="Voltar para os Baralhos">
-                    <ArrowLeftIcon />
-                </IconButton>
-                <div className="deck-card-list-title">
-                    <h2 title={deckName}>{deckName}</h2>
-                </div>
-                <div className="deck-card-list-actions">
-                     <Button variant="link" onClick={() => onBulkAdd(deckName)}>
-                       <PlusIcon /> Em Massa
-                    </Button>
-                    <Button className="btn-practice" onClick={onPractice} disabled={cards.length === 0}>
-                        <PlayIcon /> Praticar
-                    </Button>
-                </div>
+        <div className="session-complete">
+            <div className="confetti-canvas-container">
+                <canvas ref={canvasRef}></canvas>
             </div>
-            {cards.length > 0 ? (
-                <ul className="all-cards-list" ref={listRef}>
-                    {cards.sort((a,b) => b.id - a.id).map(card => (
-                        <li key={card.id} className={`card-list-item affinity-${calculateAffinity(card)} ${itemToDelete === card.id ? 'is-deleting' : ''} ${newlyAddedCardId === card.id ? 'new-card-animation' : ''}`}>
-                            <div className="card-list-text">
-                                <span className="card-list-front">{card.front}</span>
-                                <span className="card-list-back">{card.back}</span>
-                            </div>
-                            <div className="card-list-actions">
-                                <IconButton className="move" title="Mover para outro baralho" onClick={() => onMoveCard(card.id)}>
-                                    <ArrowRightLeftIcon />
-                                </IconButton>
-                                <IconButton className="edit-card-btn" title="Editar Cartão" onClick={() => onEditCard(card)}>
-                                    <PencilIcon />
-                                </IconButton>
-                                <IconButton className="edit-card-btn delete" title="Excluir Cartão" onClick={() => onDeleteCard(card.id)}>
-                                    <TrashIcon />
-                                </IconButton>
-                            </div>
-                        </li>
-                    ))}
-                </ul>
-            ) : (
-                <div className="empty-deck-message">
-                    <p>Este baralho está vazio.</p>
-                    <p>Adicione alguns cartões para começar a praticar!</p>
-                </div>
-            )}
+            <h2>Parabéns!</h2>
+            <p>Você revisou todas as cartas por hoje.</p>
+            <div className="session-complete-actions">
+                <button className="btn" onClick={onGoToDecks}>
+                   <ListIcon/> Ver Baralhos
+                </button>
+                <button className="btn btn-outline" onClick={onAddMore}>
+                   <PlusIcon/> Adicionar Cartas
+                </button>
+            </div>
         </div>
     );
 };
 
-const PracticeView = ({ cards, deckName, onExit }) => {
-    const [currentIndex, setCurrentIndex] = useState(0);
-    const [isFlipped, setIsFlipped] = useState(false);
-    const currentCard = cards[currentIndex];
+const WelcomeEmptyState: React.FC<{ onAddNewDeck: () => void }> = ({ onAddNewDeck }) => (
+    <div className="empty-state-container">
+        <ListIcon />
+        <h3>Bem-vindo ao Gaku!</h3>
+        <p>Parece que você ainda não tem nenhum baralho. Crie o seu primeiro para começar a adicionar cartas e revisar.</p>
+        <button className="btn" onClick={onAddNewDeck}>
+            <PlusIcon /> Criar Meu Primeiro Baralho
+        </button>
+    </div>
+);
 
-    const handleNav = (direction: 'next' | 'prev') => {
-        trackEvent('practice_navigate', { direction, deck_name: deckName });
-        let newIndex = direction === 'next' ? currentIndex + 1 : currentIndex - 1;
-        if (newIndex >= cards.length) newIndex = 0;
-        if (newIndex < 0) newIndex = cards.length - 1;
-        setCurrentIndex(newIndex);
-        setIsFlipped(false);
-    };
-    
-    const handleFlip = () => {
-        trackEvent('flip_card', {
-            type: 'practice',
-            direction: isFlipped ? 'back_to_front' : 'front_to_back',
-            card_id: currentCard.id
+const SettingsView: React.FC<{
+    settings: { review: ReviewSettings };
+    onSettingsChange: (newSettings: Partial<ReviewSettings>) => void;
+    onBackup: () => string;
+    onRestore: (data: string) => void;
+    onExportJson: () => void;
+    onExportCsv: () => void;
+    onImport: (file: File) => void;
+}> = ({ settings, onSettingsChange, onBackup, onRestore, onExportJson, onExportCsv, onImport }) => {
+    const [backupData, setBackupData] = useState('');
+    const [restoreData, setRestoreData] = useState('');
+    const [showCode, setShowCode] = useState(false);
+    const restoreInputRef = useRef<HTMLTextAreaElement>(null);
+    const fileInputRef = useRef<HTMLInputElement>(null);
+
+    const handleBackup = () => {
+        const data = onBackup();
+        setBackupData(data);
+        setShowCode(true);
+        navigator.clipboard.writeText(data).then(() => {
+             alert('Código de backup copiado para a área de transferência!');
+        }, () => {
+            alert('Não foi possível copiar o código. Por favor, copie manualmente.');
         });
-        setIsFlipped(f => !f);
-    }
-    
-    if (!currentCard) {
-        return (
-            <div className="practice-view">
-                 <div className="practice-header">
-                    <IconButton className="back-btn" onClick={onExit} title="Sair do modo de prática">
-                        <XIcon />
-                    </IconButton>
-                    <h3>Praticar: {deckName}</h3>
-                </div>
-                <div className="empty-deck-message">
-                    <p>Não há cartões para praticar neste baralho.</p>
-                </div>
-            </div>
-        )
-    }
-
-    return (
-        <div className="practice-view">
-            <div className="practice-header">
-                 <IconButton className="back-btn" onClick={onExit} title="Sair do modo de prática">
-                    <XIcon />
-                 </IconButton>
-                 <h3>Praticar: {deckName}</h3>
-                 <div className="progress">{currentIndex + 1}/{cards.length}</div>
-            </div>
-            <Flashcard
-                frontContent={currentCard.front}
-                backContent={currentCard.back}
-                isFlipped={isFlipped}
-                onFlip={handleFlip}
-                mode="practice"
-            />
-            <div className="practice-controls">
-                <IconButton onClick={() => handleNav('prev')} title="Cartão Anterior">
-                    <ArrowLeftIcon />
-                </IconButton>
-                <Button onClick={handleFlip}>
-                    {isFlipped ? 'Ocultar Resposta' : 'Mostrar Resposta'}
-                </Button>
-                <IconButton onClick={() => handleNav('next')} title="Próximo Cartão">
-                    <ArrowRightIcon />
-                </IconButton>
-            </div>
-        </div>
-    );
-};
-
-
-const EditCardModal = ({ card, decks, onSave, onCancel }) => {
-    const [front, setFront] = useState(card.front);
-    const [back, setBack] = useState(card.back);
-
-    const handleSubmit = (e: React.FormEvent) => {
-        e.preventDefault();
-        onSave({ ...card, front, back });
     };
 
-    return (
-        <div className="modal-overlay" onClick={onCancel}>
-            <div className="edit-card-form" onClick={(e) => e.stopPropagation()}>
-                <form onSubmit={handleSubmit}>
-                    <h2>Editar Cartão</h2>
-                    <div className="form-group">
-                        <label htmlFor="edit-front">Frente</label>
-                        <textarea id="edit-front" value={front} onChange={e => setFront(e.target.value)} required />
-                    </div>
-                    <div className="form-group">
-                        <label htmlFor="edit-back">Verso</label>
-                        <textarea id="edit-back" value={back} onChange={e => setBack(e.target.value)} required />
-                    </div>
-                    <div className="dialog-actions">
-                        <Button variant="cancel" type="button" onClick={onCancel}>Cancelar</Button>
-                        <Button type="submit">Salvar</Button>
-                    </div>
-                </form>
-            </div>
-        </div>
-    );
-};
-
-const BulkAddView = ({ deckName, onSave, onBack }) => {
-    const [text, setText] = useState('');
-
-    const handleSave = () => {
-        trackEvent('bulk_add_cards', { deck_name: deckName, line_count: text.split('\n').length });
-        onSave(deckName, text);
-        onBack();
-    };
-
-    return (
-        <div className="settings-view">
-            <div className="deck-card-list-header">
-                <IconButton className="back-btn" onClick={onBack} title="Voltar">
-                    <ArrowLeftIcon />
-                </IconButton>
-                <h2>Adicionar em Massa em "{deckName}"</h2>
-            </div>
-            <div className="settings-section">
-                <div className="form-instructions">
-                    <p>Digite ou cole seus cartões aqui. Cada linha representa um cartão.</p>
-                    <p>Use um <strong>ponto e vírgula (;)</strong> ou <strong>tab</strong> para separar a frente do verso.</p>
-                    <p>Exemplo: <code>ありがとう;Obrigado</code></p>
-                </div>
-                <textarea
-                    value={text}
-                    onChange={e => setText(e.target.value)}
-                    placeholder={'こんにちは;Olá\nさようなら;Adeus'}
-                    rows={15}
-                />
-                <Button onClick={handleSave} disabled={!text.trim()}>
-                    <PlusIcon /> Adicionar Cartões
-                </Button>
-            </div>
-        </div>
-    );
-};
-
-const SettingsView = ({ settings, onSaveSettings, onExport, onRestore, onResetApp, onShowTour, theme, onThemeChange }) => {
-    const [restoreCode, setRestoreCode] = useState('');
-    const [isRestoring, setIsRestoring] = useState(false);
-    
-    const handleRestoreClick = () => {
-        if (!isRestoring) {
-            setIsRestoring(true);
+    const handleRestore = () => {
+        if (restoreData.trim() === '') {
+            alert('Por favor, cole seu código de backup.');
             return;
         }
-        onRestore(restoreCode);
-        setIsRestoring(false);
-        setRestoreCode('');
+        if (confirm('Restaurar os dados substituirá todos os seus baralhos e cartas atuais. Tem certeza que deseja continuar?')) {
+            onRestore(restoreData);
+            setRestoreData('');
+            alert('Dados restaurados com sucesso!');
+        }
     };
-    
+
+    const handleFileImport = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (file) {
+            onImport(file);
+        }
+        // Reset file input to allow selecting the same file again
+        if (e.target) {
+          e.target.value = '';
+        }
+    };
+
     return (
         <div className="settings-view">
-             <h2>Ajustes</h2>
+            <h2>Ajustes</h2>
             <div className="settings-section">
-                <h3><SettingsIcon /> Geral</h3>
-                <div className="form-group">
-                    <label>Tema</label>
-                    <div className="theme-toggle" style={{ display: 'flex', gap: '10px' }}>
-                        <Button variant={theme === 'light' ? 'primary' : 'cancel'} onClick={() => onThemeChange('light')}>Claro</Button>
-                        <Button variant={theme === 'dark' ? 'primary' : 'cancel'} onClick={() => onThemeChange('dark')}>Escuro</Button>
-                    </div>
-                </div>
-                <Button onClick={onShowTour} variant="link" style={{ alignSelf: 'flex-start' }}>Mostrar tour de introdução</Button>
-            </div>
-            
-            <div className="settings-section">
-                <h3><EyeIcon /> Revisão</h3>
-                <div className="form-group">
-                    <label htmlFor="review-order">Ordem das revisões</label>
-                    <select
-                        id="review-order"
-                        className="settings-select"
-                        value={settings.order}
-                        onChange={(e) => onSaveSettings({ ...settings, order: e.target.value as ReviewSettings['order'] })}
-                    >
-                        <option value="default">Padrão (SRS)</option>
+                 <h3><SettingsIcon /> Configurações de Revisão</h3>
+                 <div className="form-group">
+                    <label htmlFor="review-order">Ordem da Revisão</label>
+                    <select id="review-order" className="settings-select" value={settings.review.order} onChange={e => onSettingsChange({ order: e.target.value as ReviewSettings['order'] })}>
+                        <option value="default">Padrão (Mais antigos primeiro)</option>
                         <option value="random">Aleatória</option>
-                        <option value="newestFirst">Mais novos primeiro</option>
+                        <option value="newestFirst">Mais novas primeiro</option>
                     </select>
                 </div>
-                 <div className="form-group">
-                    <label htmlFor="daily-limit">Limite diário de revisões</label>
-                    <input
-                        id="daily-limit"
-                        type="number"
-                        className="settings-input"
-                        value={settings.dailyLimit}
-                        onChange={(e) => onSaveSettings({ ...settings, dailyLimit: parseInt(e.target.value, 10) || 0 })}
-                        min="0"
-                    />
-                    <small>Defina como 0 para sem limite.</small>
+                <div className="form-group">
+                    <label htmlFor="daily-limit">Limite Diário de Cartas (0 = sem limite)</label>
+                    <input id="daily-limit" className="settings-input" type="number" min="0" value={settings.review.dailyLimit} onChange={e => onSettingsChange({ dailyLimit: parseInt(e.target.value, 10) || 0 })} />
                 </div>
             </div>
-
             <div className="settings-section">
-                <h3><CloudUploadIcon /> Backup & Restauração</h3>
+                <h3><CloudUploadIcon/> Backup & Restauração</h3>
                  <p>
-                    Exporte seus dados para um arquivo de texto para backup ou para movê-los para outro dispositivo.
-                    Cole os dados de um backup para restaurar.
+                    Salve todos os seus dados em um código de texto ou exporte-os como um arquivo JSON (completo) ou CSV (para planilhas).
                 </p>
                 <div className="backup-actions">
-                    <Button onClick={onExport}><CloudDownloadIcon /> Exportar Dados</Button>
-                    <Button onClick={handleRestoreClick} variant="outline">
-                        <CloudUploadIcon /> {isRestoring ? "Confirmar Restauração" : "Restaurar Dados"}
-                    </Button>
+                    <button className="btn" onClick={handleBackup}><CloudDownloadIcon/> Gerar Código de Backup</button>
+                    <button className="btn" onClick={onExportJson}><FileTextIcon/> Exportar (JSON)</button>
+                    <button className="btn" onClick={onExportCsv}><FileTextIcon/> Exportar (CSV)</button>
                 </div>
-                {isRestoring && (
-                    <div className="code-display-area">
-                         <label htmlFor="restore-code" className="restore-title">Cole seu código de backup aqui:</label>
-                        <textarea
-                            id="restore-code"
-                            value={restoreCode}
-                            onChange={(e) => setRestoreCode(e.target.value)}
-                            placeholder="Cole o código de backup aqui..."
-                        />
+
+                {showCode && (
+                     <div className="code-display-area">
+                        <label htmlFor="backup-code">Seu código de backup (guarde em um local seguro):</label>
+                        <textarea id="backup-code" readOnly value={backupData} rows={5}></textarea>
                     </div>
                 )}
-            </div>
-
-            <div className="settings-section">
-                 <h3><TrashIcon /> Zona de Perigo</h3>
-                 <p>Esta ação não pode ser desfeita. Todos os seus baralhos e progresso de estudo serão perdidos permanentemente.</p>
-                 <Button onClick={onResetApp} variant="destructive">
-                     <TrashIcon/> Apagar Todos os Dados
-                 </Button>
+                
+                <h4 className="restore-title">Restaurar Dados</h4>
+                <div className="backup-actions">
+                    <button className="btn" onClick={() => fileInputRef.current?.click()}><CloudUploadIcon/> Importar Arquivo</button>
+                    <input type="file" ref={fileInputRef} onChange={handleFileImport} accept=".csv,.json" style={{ display: 'none' }} />
+                </div>
+                 <textarea
+                    ref={restoreInputRef}
+                    value={restoreData}
+                    onChange={e => setRestoreData(e.target.value)}
+                    placeholder="Cole seu código de backup aqui..."
+                    rows={5}
+                />
+                 <button className="btn" onClick={handleRestore} disabled={!restoreData.trim()}>Restaurar do Código</button>
             </div>
         </div>
     );
 };
 
-const StatsView = ({ cards, studyHistory }) => {
+const StatsView: React.FC<{ cards: Card[], studyHistory: StudyDay[], onBack: () => void }> = ({ cards, studyHistory, onBack }) => {
+
     const stats = useMemo(() => {
-        const now = new Date();
-        const todayStr = getTodaysDateString();
-        
-        const matureThreshold = 21; // days
-        
         const totalCards = cards.length;
-        const dueToday = cards.filter(c => c.dueDate <= todayStr).length;
-        const newCards = cards.filter(c => c.repetitions === 0).length;
-        const learning = cards.filter(c => c.repetitions > 0 && c.interval < matureThreshold).length;
-        const mature = cards.filter(c => c.interval >= matureThreshold).length;
+        const matureCards = cards.filter(c => c.interval >= 21).length;
+        const learningCards = cards.filter(c => c.interval > 0 && c.interval < 21).length;
+        const newCards = cards.filter(c => c.interval === 0).length;
 
-        const totalReviews = studyHistory.reduce((sum, day) => sum + day.reviewed, 0);
-        const correctReviews = studyHistory.reduce((sum, day) => sum + day.correct, 0);
-        const accuracy = totalReviews > 0 ? ((correctReviews / totalReviews) * 100).toFixed(0) : '0';
+        const totalReviewed = studyHistory.reduce((sum, day) => sum + day.reviewed, 0);
+        const totalCorrect = studyHistory.reduce((sum, day) => sum + day.correct, 0);
+        const successRate = totalReviewed > 0 ? ((totalCorrect / totalReviewed) * 100).toFixed(0) : '0';
 
-        return { totalCards, dueToday, newCards, learning, mature, accuracy, totalReviews };
+        return { totalCards, matureCards, learningCards, newCards, totalReviewed, successRate };
     }, [cards, studyHistory]);
-    
+
     const masteryData = [
-        { label: 'Novos', value: stats.newCards, className: 'new' },
-        { label: 'Aprendendo', value: stats.learning, className: 'learning' },
-        { label: 'Maduros', value: stats.mature, className: 'mature' },
+        { label: 'Novas', value: stats.newCards, className: 'new' },
+        { label: 'Aprendendo', value: stats.learningCards, className: 'learning' },
+        { label: 'Maduras', value: stats.matureCards, className: 'mature' }
     ];
-    
+    const maxMasteryValue = Math.max(...masteryData.map(d => d.value), 1);
+
+    const activityHistoryData = useMemo(() => {
+        const days = [];
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        for (let i = 29; i >= 0; i--) {
+            const date = new Date(today);
+            date.setDate(date.getDate() - i);
+            const dateString = date.toISOString().split('T')[0];
+            const studyDay = studyHistory.find(d => d.date === dateString);
+            days.push({
+                date: date,
+                count: studyDay ? studyDay.reviewed : 0,
+            });
+        }
+        return days;
+    }, [studyHistory]);
+
+    const maxActivityValue = Math.max(...activityHistoryData.map(d => d.count), 1);
+
+    const monthFormatter = new Intl.DateTimeFormat('pt-BR', { month: 'short' });
+    const dayFormatter = new Intl.DateTimeFormat('pt-BR', { day: 'numeric' });
+
     if (cards.length === 0) {
         return (
-             <div className="empty-state-container">
-                <BarChartIcon />
-                <h3>Estatísticas</h3>
-                <p>Nenhum dado para mostrar ainda. Comece a estudar para ver seu progresso aqui!</p>
+            <div className="stats-view">
+                 <div className="deck-card-list-header">
+                    <button onClick={onBack} className="back-btn" aria-label="Voltar"><ArrowLeftIcon/></button>
+                    <h2 style={{flexGrow: 1}}>Estatísticas</h2>
+                </div>
+                <div className="empty-state-container">
+                    <BarChartIcon />
+                    <h3>Sem dados para exibir</h3>
+                    <p>Comece a adicionar e revisar cartas para ver suas estatísticas de aprendizado.</p>
+                </div>
             </div>
         );
     }
 
     return (
         <div className="stats-view">
-            <h2>Estatísticas</h2>
+            <div className="deck-card-list-header">
+                <button onClick={onBack} className="back-btn" aria-label="Voltar"><ArrowLeftIcon/></button>
+                <h2 style={{flexGrow: 1}}>Estatísticas</h2>
+            </div>
             <div className="stats-cards-container">
                 <div className="stat-card">
-                    <div className="stat-value">{stats.totalCards}</div>
-                    <div className="stat-label">Total de Cartas</div>
-                </div>
-                <div className="stat-card">
-                    <div className="stat-value">{stats.dueToday}</div>
-                    <div className="stat-label">Para Hoje</div>
+                    <span className="stat-value">{stats.totalCards}</span>
+                    <span className="stat-label">Total de Cartas</span>
                 </div>
                  <div className="stat-card">
-                    <div className="stat-value">{stats.accuracy}<small>%</small></div>
-                    <div className="stat-label">Precisão</div>
+                    <span className="stat-value">{stats.totalReviewed}</span>
+                    <span className="stat-label">Revisões Totais</span>
+                </div>
+                 <div className="stat-card">
+                    <span className="stat-value">{stats.successRate}<small>%</small></span>
+                    <span className="stat-label">Taxa de Acerto</span>
                 </div>
             </div>
-            
+
+             <div className="activity-chart-container">
+                <h3><CalendarIcon /> Histórico de Atividade (Últimos 30 dias)</h3>
+                <div className="activity-chart">
+                    {activityHistoryData.map(({ date, count }, index) => {
+                        const isFirstOfMonth = date.getDate() === 1;
+                        const isMonday = date.getDay() === 1;
+                        const showLabel = isFirstOfMonth || isMonday;
+                        const labelText = isFirstOfMonth 
+                            ? monthFormatter.format(date)
+                            : dayFormatter.format(date);
+                        
+                        return (
+                           <div key={index} className="activity-bar-wrapper" title={`${dayFormatter.format(date)} de ${monthFormatter.format(date)}: ${count} revisões`}>
+                                <div className="activity-bar-value">{count}</div>
+                                <div 
+                                    className={`activity-bar ${ (isFirstOfMonth || isMonday) ? 'significant-day' : ''}`}
+                                    style={{ height: `${(count / maxActivityValue) * 100}%` }}
+                                ></div>
+                                <div className={`activity-bar-label ${isFirstOfMonth ? 'is-month' : ''}`}>
+                                    {showLabel ? labelText : ''}
+                                 </div>
+                           </div>
+                        );
+                    })}
+                </div>
+            </div>
+
             <div className="mastery-chart-container">
-                <h3>Maestria dos Cartões</h3>
+                <h3>Domínio das Cartas</h3>
                 <div className="mastery-chart">
-                    {masteryData.map(item => (
-                        <div key={item.label} className="chart-bar-container">
-                             <div className="chart-bar-value">{item.value}</div>
+                    {masteryData.map(data => (
+                        <div key={data.label} className="chart-bar-container">
+                            <div className="chart-bar-value">{data.value}</div>
                             <div
-                                className={`chart-bar ${item.className}`}
-                                style={{ height: `${stats.totalCards > 0 ? (item.value / stats.totalCards) * 100 : 0}%` }}
-                                title={`${item.label}: ${item.value}`}
-                            />
-                            <div className="chart-bar-label">{item.label}</div>
+                                className={`chart-bar ${data.className}`}
+                                style={{ height: `${(data.value / maxMasteryValue) * 100}%` }}
+                                title={`${data.label}: ${data.value}`}
+                            ></div>
+                            <div className="chart-bar-label">{data.label}</div>
                         </div>
                     ))}
                 </div>
             </div>
-
-            <ActivityHistoryChart studyHistory={studyHistory} />
         </div>
     );
 };
 
-const ActivityHistoryChart = ({ studyHistory }) => {
-    const chartData = useMemo(() => {
-        const data = new Map<string, number>();
-        studyHistory.forEach(day => {
-            data.set(day.date, day.reviewed);
-        });
+const PracticeView: React.FC<{
+    cards: Card[];
+    deckName: string;
+    onEnd: () => void;
+}> = ({ cards, deckName, onEnd }) => {
+    const [currentIndex, setCurrentIndex] = useState(0);
+    const [isFlipped, setIsFlipped] = useState(false);
 
-        const result = [];
-        let date = new Date();
-        date.setDate(date.getDate() - 89); // ~3 months of history
+    if (cards.length === 0) {
+        return <div className="practice-view">Nenhuma carta para praticar.</div>;
+    }
 
-        for (let i = 0; i < 90; i++) {
-            const dateStr = date.toISOString().split('T')[0];
-            result.push({
-                date: dateStr,
-                value: data.get(dateStr) || 0,
-                dateObj: new Date(date)
-            });
-            date.setDate(date.getDate() + 1);
+    const currentCard = cards[currentIndex];
+
+    const goToNext = useCallback(() => {
+        setIsFlipped(false);
+        setCurrentIndex(prev => (prev + 1) % cards.length);
+    }, [cards.length]);
+
+    const goToPrev = useCallback(() => {
+        setIsFlipped(false);
+        setCurrentIndex(prev => (prev - 1 + cards.length) % cards.length);
+    }, [cards.length]);
+    
+    const handlePracticeSwipe = useCallback((direction: 'left' | 'right' | 'up') => {
+        // In practice mode, swipe is for navigation on the front of the card
+        if (direction === 'left') { // swipe left for next card
+            goToNext();
+        } else if (direction === 'right') { // swipe right for previous card
+            goToPrev();
         }
-        return result;
-    }, [studyHistory]);
-
-    const maxValue = Math.max(...chartData.map(d => d.value), 1); // Avoid division by zero
+    }, [goToNext, goToPrev]);
     
     return (
-        <div className="activity-chart-container">
-            <h3><CalendarIcon /> Histórico de Atividade (Últimos 90 dias)</h3>
-            <div className="activity-chart">
-                {chartData.map(({ date, value, dateObj }) => {
-                    const height = (value / maxValue) * 100;
-                    const dayOfMonth = dateObj.getDate();
-                    const isFirstOfMonth = dayOfMonth === 1;
-                    const isSunday = dateObj.getDay() === 0;
-
-                    let label = '';
-                    if (isFirstOfMonth) {
-                        label = dateObj.toLocaleDateString('default', { month: 'short' });
-                    } else if (isSunday) {
-                        label = String(dayOfMonth);
-                    }
-                    
-                    return (
-                        <div key={date} className="activity-bar-wrapper" title={`${value} revisões em ${dateObj.toLocaleDateString()}`}>
-                            <div className="activity-bar-value">{value}</div>
-                            <div className={`activity-bar ${value > 0 ? 'significant-day' : ''}`} style={{ height: `${height}%` }}></div>
-                             {label && <div className={`activity-bar-label ${isFirstOfMonth ? 'is-month' : ''}`}>{label}</div>}
-                        </div>
-                    );
-                })}
+        <div className="practice-view">
+             <div className="practice-header">
+                <button onClick={onEnd} className="back-btn"><XIcon/></button>
+                <h3>Praticando: {deckName}</h3>
+                <div className="progress">{currentIndex + 1}/{cards.length}</div>
+            </div>
+            <Flashcard card={currentCard} isFlipped={isFlipped} onFlip={() => setIsFlipped(!isFlipped)} feedbackState="" onSwipe={handlePracticeSwipe} mode="practice" />
+            <div className="practice-controls">
+                <button onClick={goToPrev} className="icon-btn" aria-label="Carta Anterior"><ArrowLeftIcon/></button>
+                <button onClick={() => setIsFlipped(!isFlipped)} className="btn">
+                    {isFlipped ? 'Ocultar Resposta' : 'Mostrar Resposta'}
+                </button>
+                <button onClick={goToNext} className="icon-btn" aria-label="Próxima Carta"><ArrowRightIcon/></button>
             </div>
         </div>
     );
 };
 
-const CommunityView = ({ localDecks, onDownloadDeck, navigateTo }) => {
+const CommunityView: React.FC<{
+    onDownloadDeck: (deck: PublicDeck, cards: PublicCard[]) => void;
+    localDeckNames: Set<string>;
+    onNavigate: (view: View) => void;
+}> = ({ onDownloadDeck, localDeckNames, onNavigate }) => {
     const [publicDecks, setPublicDecks] = useState<PublicDeck[]>([]);
     const [loading, setLoading] = useState(true);
-    const [error, setError] = useState<string | null>(null);
+    const [downloading, setDownloading] = useState<string | null>(null);
+    const [modalConfig, setModalConfig] = useState<ModalConfig | null>(null);
 
     useEffect(() => {
-        trackEvent('view_community_page');
         const fetchDecks = async () => {
-            try {
-                setLoading(true);
-                const decks = await communityApi.getPublicDecks();
-                setPublicDecks(decks);
-            } catch (err) {
-                setError('Não foi possível carregar os baralhos da comunidade. Tente novamente mais tarde.');
-                console.error(err);
-            } finally {
-                setLoading(false);
-            }
+            setLoading(true);
+            const decks = await communityApi.getPublicDecks();
+            setPublicDecks(decks);
+            setLoading(false);
         };
         fetchDecks();
     }, []);
 
-    const isDeckOwned = (deckName: string) => {
-        return localDecks.some(d => d.name === deckName);
-    };
+    const handleDownload = async (deck: PublicDeck) => {
+        setDownloading(deck.name);
+        const cards = await communityApi.getDeckCards(deck.name);
+        setDownloading(null);
+        
+        if (cards.length === 0) {
+            alert(`Não foi possível baixar as cartas para "${deck.name}". Tente novamente mais tarde.`);
+            return;
+        }
 
-    if (loading) {
-        return (
-            <div className="settings-view">
-                <h2>Comunidade</h2>
-                <div style={{ display: 'flex', justifyContent: 'center', padding: '40px' }}>
-                    <Loader />
-                </div>
-            </div>
-        );
-    }
-    
-    if (error) {
-        return <div className="settings-view"><h2>Comunidade</h2><p>{error}</p></div>;
-    }
+        const handleConfirmDownload = () => {
+            onDownloadDeck(deck, cards);
+            setPublicDecks(prevDecks =>
+                prevDecks.map(d =>
+                    d.name === deck.name
+                        ? { ...d, downloads: (d.downloads || 0) + 1 }
+                        : d
+                )
+            );
+        };
+
+        const localDeckExists = localDeckNames.has(deck.name.toLowerCase());
+        
+        if (localDeckExists) {
+             setModalConfig({
+                type: 'confirm',
+                title: 'Baralho já existe',
+                message: `Você já tem um baralho chamado "${deck.name}". Baixar este baralho irá adicionar as cartas da comunidade a ele. As cartas duplicadas serão ignoradas. Deseja continuar?`,
+                confirmText: 'Continuar',
+                onConfirm: handleConfirmDownload,
+            });
+        } else {
+            handleConfirmDownload();
+        }
+    };
 
     return (
         <div className="decks-view">
-            <h2>Comunidade</h2>
-            {publicDecks.length > 0 ? (
-                <ul className="deck-list">
-                    {publicDecks.map(deck => (
-                        <li key={deck.id || deck.name} className="deck-list-item">
-                           <div className="deck-item-main" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: '8px', cursor: 'default' }}>
-                                <div style={{width: '100%', display: 'flex', justifyContent: 'space-between'}}>
-                                    <span className="deck-name">{deck.name}</span>
-                                    <span className="deck-card-count">{deck.cardCount} cartas</span>
-                                </div>
-                                <p style={{fontSize: '0.9rem', color: 'var(--secondary-text-color)', margin: 0}}>{deck.description}</p>
-                                <div className="deck-metadata">
-                                    <span>por: <em>{deck.author || 'Anônimo'}</em></span>
-                                    <div className="download-count">
-                                        <DownloadIcon /> {deck.downloads}
-                                    </div>
-                                </div>
-                            </div>
-
-                            <div className="deck-item-actions">
-                               {isDeckOwned(deck.name) ? (
-                                    <IconButton className="owned" title="Você já possui este baralho" disabled>
-                                        <CheckCircleIcon />
-                                    </IconButton>
-                                ) : (
-                                    <IconButton className="download" title="Baixar Baralho" onClick={() => onDownloadDeck(deck)}>
-                                        <CloudDownloadIcon />
-                                    </IconButton>
-                                )}
-                            </div>
-                        </li>
-                    ))}
-                </ul>
-            ) : (
-                <div className="empty-deck-message">
-                    <span>Ainda não há baralhos na comunidade.</span>
-                </div>
-            )}
-             <div className="community-footer">
-                <p>Quer compartilhar seu próprio baralho? Vá para a tela 'Baralhos' e clique no ícone de compartilhamento!</p>
+            <div className="decks-view-header">
+                <h2>Explorar Baralhos da Comunidade</h2>
             </div>
+
+            {loading ? <Loader /> : (
+                <>
+                    {publicDecks.length > 0 ? (
+                        <ul className="deck-list">
+                            {publicDecks.map((deck) => {
+                                const isOwned = localDeckNames.has(deck.name.toLowerCase());
+                                return (
+                                <li key={deck.id || deck.name} className="deck-list-item">
+                                    <div className="deck-item-main" style={{ cursor: 'default', flexDirection: 'column', alignItems: 'flex-start', gap: '8px' }}>
+                                        <div style={{width: '100%', display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
+                                            <div className="deck-name">{deck.name}</div>
+                                            <div className="deck-card-count">{deck.cardCount} cartas</div>
+                                        </div>
+                                        <div className="deck-card-count" style={{ fontStyle: 'italic', paddingRight: '20px' }}>{deck.description || 'Sem descrição.'}</div>
+                                        <div className="deck-metadata">
+                                            <span>Por: <strong>{deck.author || 'Anônimo'}</strong></span>
+                                            <span className="download-count"><DownloadIcon/> {deck.downloads || 0}</span>
+                                        </div>
+                                    </div>
+                                    <div className="deck-item-actions">
+                                        {isOwned ? (
+                                             <button className="deck-action-btn owned" title="Você já possui este baralho" disabled>
+                                                <CheckCircleIcon/>
+                                            </button>
+                                        ) : (
+                                            <button 
+                                                onClick={() => handleDownload(deck)} 
+                                                className="deck-action-btn download" 
+                                                title={`Baixar ${deck.name}`}
+                                                disabled={downloading !== null}
+                                            >
+                                                {downloading === deck.name ? <Loader isSmall={true} /> : <CloudDownloadIcon/>}
+                                            </button>
+                                        )}
+                                    </div>
+                                </li>
+                            )})}
+                        </ul>
+                    ) : (
+                        <div className="empty-state-container">
+                            <GlobeIcon />
+                            <h3>A comunidade está vazia</h3>
+                            <p>Ainda não há baralhos compartilhados. Que tal ser o primeiro?</p>
+                            <button className="btn btn-outline" onClick={() => onNavigate('decks')}>
+                                <Share2Icon/> Compartilhar um baralho
+                            </button>
+                        </div>
+                    )}
+                     {publicDecks.length > 0 && (
+                        <div className="community-footer">
+                            <p>Viu um baralho que gostou? Baixe-o! Ou <button className="btn-link" onClick={() => onNavigate('decks')}>compartilhe um dos seus</button> para ajudar a comunidade.</p>
+                        </div>
+                     )}
+                </>
+            )}
+            {modalConfig && <CustomDialog {...modalConfig} onDismiss={() => setModalConfig(null)} />}
         </div>
     );
 };
 
+const ShareDeckModal: React.FC<{
+    deckName: string;
+    onConfirm: (description: string, author: string) => void;
+    onCancel: () => void;
+    isLoading: boolean;
+}> = ({ deckName, onConfirm, onCancel, isLoading }) => {
+    const [description, setDescription] = useState('');
+    const [author, setAuthor] = useState(localStorage.getItem('gaku-author-name') || '');
 
-const OnboardingTour = ({ steps, currentStepIndex, onNext, onPrev, onEnd }) => {
-    const [targetRect, setTargetRect] = useState<DOMRect | null>(null);
-    const [tooltipPos, setTooltipPos] = useState({ top: 0, left: 0 });
-    const [arrowClass, setArrowClass] = useState('top-arrow');
-    const [arrowPos, setArrowPos] = useState({ top: '50%', left: '50%' });
-
-    const step = steps[currentStepIndex];
-
-    useEffect(() => {
-        if (!step) return;
-
-        const targetEl = document.querySelector(step.target);
-        if (!targetEl) {
-            console.warn(`Onboarding target not found: ${step.target}`);
-            // Maybe skip to next step or end tour if target is essential
+    const handleConfirm = () => {
+        if (!author.trim()) {
+            alert("Por favor, insira seu nome de autor.");
             return;
         }
-
-        const rect = targetEl.getBoundingClientRect();
-        setTargetRect(rect);
-
-        const tooltipEl = document.querySelector('.onboarding-tooltip') as HTMLElement;
-        if (!tooltipEl) return;
-        
-        const tooltipRect = tooltipEl.getBoundingClientRect();
-        const gap = 15; // Gap between element and tooltip
-        const margin = 10; // Margin from viewport edges
-
-        let top = 0, left = 0;
-        let arrow = 'top-arrow';
-        let arrowTop = '50%', arrowLeft = '50%';
-        
-        // Default position: below the element
-        top = rect.bottom + gap;
-        left = rect.left + rect.width / 2 - tooltipRect.width / 2;
-        arrow = 'top-arrow';
-        arrowLeft = `${tooltipRect.width / 2}px`;
-
-        // If it goes off the bottom, position it above
-        if (top + tooltipRect.height > window.innerHeight - margin) {
-            top = rect.top - tooltipRect.height - gap;
-            arrow = 'bottom-arrow';
-        }
-        
-        // Adjust horizontal position
-        if (left < margin) {
-            left = margin;
-        } else if (left + tooltipRect.width > window.innerWidth - margin) {
-            left = window.innerWidth - tooltipRect.width - margin;
-        }
-        
-        // Adjust arrow position after tooltip is placed
-        const arrowOffset = rect.left + rect.width / 2 - left;
-        arrowLeft = `${Math.max(15, Math.min(arrowOffset, tooltipRect.width - 15))}px`;
-
-        setTooltipPos({ top, left });
-        setArrowClass(arrow);
-        setArrowPos({ top: arrowTop, left: arrowLeft });
-
-    }, [step, currentStepIndex]);
-
-    if (!step || !targetRect) return null;
-    
-    const holeStyle = {
-        top: `${targetRect.top - 5}px`,
-        left: `${targetRect.left - 5}px`,
-        width: `${targetRect.width + 10}px`,
-        height: `${targetRect.height + 10}px`,
-        borderRadius: step.shape === 'circle' ? '50%' : '10px',
-        visibility: 'visible',
-        opacity: 1
-    } as React.CSSProperties;
-
-    const tooltipStyle = {
-        top: `${tooltipPos.top}px`,
-        left: `${tooltipPos.left}px`,
-        '--arrow-left-pos': arrowPos.left,
-        '--arrow-top-pos': arrowPos.top,
-        visibility: 'visible',
-        opacity: 1,
-        transform: 'scale(1)'
-    } as React.CSSProperties;
+        localStorage.setItem('gaku-author-name', author.trim());
+        onConfirm(description.trim(), author.trim());
+    };
 
     return (
-        <div className="onboarding-container">
-            <div className="onboarding-hole" style={holeStyle} />
-            <div className="onboarding-tooltip" style={tooltipStyle}>
-                 <button className="onboarding-close-btn" onClick={() => onEnd(true)}>
-                    <XIcon />
-                </button>
-                <h4>{step.title}</h4>
-                <p>{step.content}</p>
-                <div className="onboarding-nav">
-                    <div className="onboarding-dots">
-                        {steps.map((_, index) => (
-                            <div key={index} className={`onboarding-dot ${index === currentStepIndex ? 'active' : ''}`} />
-                        ))}
-                    </div>
-                    <div className="onboarding-nav-buttons">
-                        {currentStepIndex > 0 && <Button variant="cancel" onClick={onPrev}>Anterior</Button>}
-                        <Button onClick={onNext}>
-                            {currentStepIndex === steps.length - 1 ? 'Concluir' : 'Próximo'}
-                        </Button>
-                    </div>
+        <div className="modal-overlay" onClick={onCancel}>
+            <div className="custom-dialog-content" onClick={(e) => e.stopPropagation()}>
+                <h3>Compartilhar "{deckName}"</h3>
+                <p>Adicione alguns detalhes para ajudar outros usuários a encontrar seu baralho.</p>
+                <div className="form-group">
+                    <label htmlFor="share-author">Seu Nome (Autor)</label>
+                    <input
+                        id="share-author"
+                        type="text"
+                        value={author}
+                        onChange={(e) => setAuthor(e.target.value)}
+                        placeholder="Ex: Hideo"
+                        maxLength={50}
+                        required
+                        autoFocus
+                    />
                 </div>
-                <div className={`onboarding-tooltip-arrow ${arrowClass}`} />
+                <div className="form-group">
+                    <label htmlFor="share-description">Descrição (Opcional)</label>
+                    <textarea
+                        id="share-description"
+                        value={description}
+                        onChange={(e) => setDescription(e.target.value)}
+                        placeholder="Ex: Vocabulário essencial do JLPT N5, kanji, etc."
+                        rows={3}
+                        maxLength={200}
+                    />
+                </div>
+                <div className="dialog-actions">
+                    <button onClick={onCancel} className="btn btn-cancel" disabled={isLoading}>
+                        Cancelar
+                    </button>
+                    <button onClick={handleConfirm} className="btn" disabled={!author.trim() || isLoading}>
+                        {isLoading ? <Loader isSmall={true} /> : 'Confirmar e Compartilhar'}
+                    </button>
+                </div>
             </div>
         </div>
     );
 };
 
 
-// --- APP CONTAINER ---
+// --- MAIN APP COMPONENT ---
 const App = () => {
-  const [cards, setCards] = usePersistentState<Card[]>('flashcards', []);
-  const [studyHistory, setStudyHistory] = usePersistentState<StudyDay[]>('studyHistory', []);
-  const [view, setView] = useState<View>('review');
-  const [theme, setTheme] = usePersistentState<Theme>('gaku-theme', 'dark');
-  const [reviewSettings, setReviewSettings] = usePersistentState<ReviewSettings>('reviewSettings', { order: 'default', dailyLimit: 50 });
-  const [activeCard, setActiveCard] = useState<Card | null>(null); // For editing
-  const [selectedDeckForAdd, setSelectedDeckForAdd] = useState<string | null>(null); // Pre-select deck in add view
-  const [modalConfig, setModalConfig] = useState<ModalConfig | null>(null);
-  const [activeView, setActiveView] = useState<View>('review'); // This is what the user sees
-  const [communityDecksLoading, setCommunityDecksLoading] = useState(false);
-  const [showTour, setShowTour] = usePersistentState<boolean>('showTour', true);
-  const [tourStep, setTourStep] = useState(0);
-
-    // GA Initialization
+    // --- ONE-TIME DATA MIGRATION ---
     useEffect(() => {
-        const gaMeasurementId = (import.meta as any).env?.VITE_GA_MEASUREMENT_ID;
-        if (gaMeasurementId) {
-            const scriptId = 'ga-gtag';
-            if (document.getElementById(scriptId)) return;
+        const runDataMigration = () => {
+            const migrationKey = 'gaku-migration-v2-supermemo-complete';
+            if (localStorage.getItem(migrationKey) === 'true') {
+                return false; // Migration already done, no reload needed
+            }
 
-            const script = document.createElement('script');
-            script.id = scriptId;
-            script.src = `https://www.googletagmanager.com/gtag/js?id=${gaMeasurementId}`;
-            script.async = true;
-            document.head.appendChild(script);
+            console.log("Running one-time data migration check...");
+            let migrationOccurred = false;
 
-            const inlineScript = document.createElement('script');
-            inlineScript.innerHTML = `
-                window.dataLayer = window.dataLayer || [];
-                function gtag(){dataLayer.push(arguments);}
-                gtag('js', new Date());
-                gtag('config', '${gaMeasurementId}');
-            `;
-            document.head.appendChild(inlineScript);
+            // --- Migration from "jp_flashcards" with `level` property ---
+            const oldJpDataKey = 'jp_flashcards';
+            const oldJpData = localStorage.getItem(oldJpDataKey);
+            const newGakuDataKey = 'gaku-cards';
+
+            if (oldJpData) {
+                try {
+                    const parsedCards = JSON.parse(oldJpData);
+                    // Check if it's the old format (array of cards, and first card has 'level')
+                    if (Array.isArray(parsedCards) && parsedCards.length > 0 && parsedCards[0].hasOwnProperty('level') && !parsedCards[0].hasOwnProperty('repetitions')) {
+                        console.log(`Found old data format in '${oldJpDataKey}'. Migrating...`);
+
+                        const today = new Date().toISOString();
+                        const migratedCards = parsedCards.map((oldCard: any) => {
+                            // Convert old card to new SuperMemo 2 format
+                            return {
+                                id: oldCard.id,
+                                front: oldCard.front,
+                                back: oldCard.back,
+                                category: oldCard.category || 'Vocabulário Básico', // Default category if missing
+                                // Reset SRS state, but preserve the card
+                                repetitions: 0,
+                                easinessFactor: 2.5,
+                                interval: 0, // Will be due for review immediately
+                                dueDate: today
+                            };
+                        });
+
+                        localStorage.setItem(newGakuDataKey, JSON.stringify(migratedCards));
+                        // Remove old key to prevent re-migration and conflicts
+                        localStorage.removeItem(oldJpDataKey); 
+                        migrationOccurred = true;
+                        console.log("Successfully migrated cards from `level` to SuperMemo 2 format.");
+                    }
+                } catch (e) {
+                    console.error(`Could not migrate corrupt data from key '${oldJpDataKey}'.`, e);
+                }
+            }
+
+            // --- Previous migration logic for key renaming (keep as fallback) ---
+            const keyMap = {
+                'cards': 'gaku-cards',
+                'studyHistory': 'gaku-study-history',
+                'reviewSettings': 'gaku-review-settings',
+                'theme': 'gaku-theme'
+            };
+
+            for (const [oldKey, newKey] of Object.entries(keyMap)) {
+                const oldData = localStorage.getItem(oldKey);
+                const newData = localStorage.getItem(newKey);
+
+                if (oldData && !newData) {
+                    try {
+                        JSON.parse(oldData); 
+                        localStorage.setItem(newKey, oldData);
+                        localStorage.removeItem(oldKey);
+                        console.log(`Successfully migrated data from '${oldKey}' to '${newKey}'.`);
+                        migrationOccurred = true;
+                    } catch (e) {
+                        console.error(`Could not migrate corrupt data for key '${oldKey}'.`, e);
+                    }
+                }
+            }
+            
+            // Mark this specific migration as complete.
+            localStorage.setItem(migrationKey, 'true');
+
+            if (migrationOccurred) {
+                 console.log("Data migration complete. Reloading page to apply changes.");
+                 window.location.reload();
+                 return true; // Reloading page
+            }
+            return false; // No migration, no reload needed
+        };
+        
+        const isReloading = runDataMigration();
+        if (isReloading) {
+            document.body.style.display = 'none'; // Hide body to prevent flash of old content
+        }
+
+    }, []); // Empty dependency array ensures it runs only once on mount.
+
+
+    // --- STATE MANAGEMENT ---
+    const [cards, setCards] = useState<Card[]>(() => {
+        try {
+            const savedCards = localStorage.getItem('gaku-cards');
+            return savedCards ? JSON.parse(savedCards) : getInitialCards();
+        } catch (e) {
+            console.error("Failed to parse cards from localStorage", e);
+            return getInitialCards();
+        }
+    });
+    
+    const [studyHistory, setStudyHistory] = useState<StudyDay[]>(() => {
+        const savedHistory = localStorage.getItem('gaku-study-history');
+        if (!savedHistory) return [];
+        try {
+            const parsed = JSON.parse(savedHistory);
+            // Check if it's the new format. If not, reset to avoid bad data.
+            return (parsed.length > 0 && parsed[0].hasOwnProperty('reviewed')) ? parsed : [];
+        } catch(e) { 
+            return [];
+        }
+    });
+
+    const [view, setView] = useState<View>('review');
+    const [currentCategory, setCurrentCategory] = useState<string | null>(null);
+    const [isFlipped, setIsFlipped] = useState(false);
+    const [editingCard, setEditingCard] = useState<Card | null>(null);
+    const [movingCard, setMovingCard] = useState<Card | null>(null);
+    const [selectedDeck, setSelectedDeck] = useState<string | null>(null);
+    const [practiceDeck, setPracticeDeck] = useState<string | null>(null);
+    const [feedbackState, setFeedbackState] = useState('');
+    const [modalConfig, setModalConfig] = useState<ModalConfig | null>(null);
+    const [deckToShare, setDeckToShare] = useState<string | null>(null);
+    const [notificationPermission, setNotificationPermission] = useState<NotificationPermissionStatus>('default');
+    const [isLoading, setIsLoading] = useState(false);
+    const [reviewQueue, setReviewQueue] = useState<Card[]>([]);
+    const [currentCardIndex, setCurrentCardIndex] = useState(0);
+
+    // Settings State
+    const [theme, setTheme] = useState<Theme>(() => (localStorage.getItem('gaku-theme') as Theme) || 'light');
+    const [reviewSettings, setReviewSettings] = useState<ReviewSettings>(() => {
+        try {
+            const savedSettings = localStorage.getItem('gaku-review-settings');
+            const defaults: ReviewSettings = { order: 'default', dailyLimit: 50 };
+            const parsed = savedSettings ? JSON.parse(savedSettings) : {};
+            return { ...defaults, ...parsed };
+        } catch(e) { 
+            return { order: 'default', dailyLimit: 50 }; 
+        }
+    });
+    
+    // Onboarding State
+    const [isOnboarding, setIsOnboarding] = useState(false);
+    const [onboardingStep, setOnboardingStep] = useState(0);
+
+
+    // --- DERIVED STATE & MEMOS ---
+    const now = useMemo(() => new Date(), [view, cards]); // Recalculate 'now' when cards change or view switches
+
+    const dueCards = useMemo(() => {
+        return cards.filter(card => new Date(card.dueDate) <= now);
+    }, [cards, now]);
+
+    const decksWithDueCounts = useMemo(() => {
+        const deckMap = new Map<string, number>();
+        dueCards.forEach(card => {
+            deckMap.set(card.category, (deckMap.get(card.category) || 0) + 1);
+        });
+        return Array.from(deckMap.entries())
+            .map(([name, count]) => ({ name, count }))
+            .sort((a, b) => a.name.localeCompare(b.name));
+    }, [dueCards]);
+    
+    const currentCard = reviewQueue[currentCardIndex];
+
+    const allDecks = useMemo(() => {
+         const deckMap = new Map<string, number>();
+         cards.forEach(card => {
+            // Exclude placeholder cards from count
+            if (card.repetitions !== -1) {
+                deckMap.set(card.category, (deckMap.get(card.category) || 0) + 1);
+            }
+         });
+         // Make sure decks with only placeholder cards are still listed (as count 0)
+         const allCategories = new Set(cards.map(c => c.category));
+         allCategories.forEach(cat => {
+            if (!deckMap.has(cat)) {
+                deckMap.set(cat, 0);
+            }
+         });
+
+         return Array.from(deckMap.entries())
+            .map(([name, count]) => ({ name, count }))
+            .sort((a, b) => a.name.localeCompare(b.name));
+    }, [cards]);
+    
+    const localDeckNamesSet = useMemo(() => new Set(allDecks.map(d => d.name.toLowerCase())), [allDecks]);
+    const existingCategories = useMemo(() => allDecks.map(d => d.name), [allDecks]);
+    
+    const cardsInSelectedDeck = useMemo(() => {
+        if (!selectedDeck) return [];
+        return cards.filter(c => c.category === selectedDeck && c.repetitions !== -1);
+    }, [cards, selectedDeck]);
+
+    const cardsInPracticeDeck = useMemo(() => {
+        if (!practiceDeck) return [];
+        return cards.filter(c => c.category === practiceDeck && c.repetitions !== -1);
+    }, [cards, practiceDeck]);
+
+
+    // --- EFFECTS ---
+    useEffect(() => {
+        try {
+            localStorage.setItem('gaku-cards', JSON.stringify(cards));
+        } catch (e) {
+            console.error("Failed to save cards to localStorage", e);
+        }
+    }, [cards]);
+
+    useEffect(() => {
+         try {
+            localStorage.setItem('gaku-study-history', JSON.stringify(studyHistory));
+        } catch (e) {
+            console.error("Failed to save history to localStorage", e);
+        }
+    }, [studyHistory]);
+
+    useEffect(() => {
+        localStorage.setItem('gaku-theme', theme);
+        document.documentElement.setAttribute('data-theme', theme);
+    }, [theme]);
+    
+    useEffect(() => {
+        const onboardingComplete = localStorage.getItem('gaku-onboarding-complete');
+        if (onboardingComplete !== 'true' && cards.length <= 5) {
+            // Delay start to allow UI to render
+            const timer = setTimeout(() => setIsOnboarding(true), 500);
+            return () => clearTimeout(timer);
         }
     }, []);
-
-  const navigateTo = (newView: View) => {
-    if (view !== newView) {
-        trackEvent('navigate', { from_view: view, to_view: newView });
-        setView(newView);
-    }
-  };
-
-  const decks = useMemo<DeckInfo[]>(() => {
-    const deckMap = new Map<string, number>();
-    cards.forEach(card => {
-      deckMap.set(card.category, (deckMap.get(card.category) || 0) + 1);
-    });
-    return Array.from(deckMap.entries()).map(([name, count]) => ({ name, count })).sort((a, b) => a.name.localeCompare(b.name));
-  }, [cards]);
-  
-  const dueCards = useMemo(() => {
-    const today = getTodaysDateString();
-    let filtered = cards.filter(c => c.dueDate <= today);
-
-    switch (reviewSettings.order) {
-        case 'random':
-            filtered = filtered.sort(() => Math.random() - 0.5);
-            break;
-        case 'newestFirst':
-            filtered = filtered.sort((a,b) => b.id - a.id);
-            break;
-        case 'default':
-        default:
-            // Default sort is by due date (oldest first)
-            filtered = filtered.sort((a, b) => new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime());
-            break;
-    }
     
-    if (reviewSettings.dailyLimit > 0) {
-        return filtered.slice(0, reviewSettings.dailyLimit);
-    }
-
-    return filtered;
-  }, [cards, reviewSettings]);
-
-  useEffect(() => {
-    document.documentElement.setAttribute('data-theme', theme);
-  }, [theme]);
-  
-  const handleThemeToggle = () => {
-    const newTheme = theme === 'light' ? 'dark' : 'light';
-    trackEvent('toggle_theme', { to_theme: newTheme });
-    setTheme(newTheme);
-  };
-  
-  const handleSaveCard = (card: Card) => {
-    const isEditing = cards.some(c => c.id === card.id);
-    trackEvent(isEditing ? 'edit_card' : 'add_card', { category: card.category });
-    setCards(prev => {
-      const newCards = isEditing ? prev.map(c => c.id === card.id ? card : c) : [...prev, card];
-      // If a new category was created, ensure the deck exists
-      if (!prev.some(c => c.category === card.category)) {
-          console.log(`New deck "${card.category}" created implicitly.`);
-      }
-      return newCards;
-    });
-  };
-
-  const handleDeleteCard = (id: number) => {
-     setModalConfig({
-        type: 'confirm',
-        title: 'Excluir Cartão?',
-        message: 'Esta ação não pode ser desfeita.',
-        confirmText: 'Excluir',
-        isDestructive: true,
-        onConfirm: () => {
-            const cardToDelete = cards.find(c => c.id === id);
-            if (cardToDelete) {
-                trackEvent('delete_card', { category: cardToDelete.category });
-                setCards(prev => prev.filter(c => c.id !== id));
-            }
-        },
-    });
-  };
-
-   const handleMoveCard = (cardId: number) => {
-        const cardToMove = cards.find(c => c.id === cardId);
-        if (!cardToMove) return;
-
-        const otherDecks = decks.filter(d => d.name !== cardToMove.category);
-
-        if (otherDecks.length === 0) {
-            setModalConfig({
-                type: 'confirm',
-                title: 'Nenhum outro baralho disponível',
-                message: 'Crie outro baralho para poder mover este cartão.',
-                confirmText: 'Ok',
-                onConfirm: () => {},
-                cancelText: ''
-            });
-            return;
+     useEffect(() => {
+        if ('Notification' in window) {
+            setNotificationPermission(Notification.permission);
+        } else {
+            setNotificationPermission('unsupported');
         }
+    }, []);
+    
+    useEffect(() => {
+        if (movingCard) {
+            const otherDecks = allDecks.filter(d => d.name !== movingCard.category).map(d => d.name);
+            if (otherDecks.length === 0) {
+                alert("Não há outros baralhos para mover a carta.");
+                setMovingCard(null);
+                return;
+            }
 
+            let selectedDeckForMove = otherDecks[0];
+
+            setModalConfig({
+                type: 'confirm', // Using confirm type, but message will have the select
+                title: `Mover "${movingCard.front}"`,
+                message: (
+                    <div className="form-group">
+                        <label htmlFor="move-deck-select">Selecione o baralho de destino:</label>
+                        <select
+                            id="move-deck-select"
+                            className="dialog-select"
+                            defaultValue={selectedDeckForMove}
+                            onChange={e => selectedDeckForMove = e.target.value}
+                            autoFocus
+                        >
+                            {otherDecks.map(name => <option key={name} value={name}>{name}</option>)}
+                        </select>
+                    </div>
+                ),
+                confirmText: 'Mover',
+                onConfirm: () => handleConfirmMoveCard(movingCard.id, selectedDeckForMove),
+                onCancel: () => setMovingCard(null),
+            });
+        }
+    }, [movingCard, allDecks]); // Rerun if allDecks changes while modal is conceptually open
+
+
+    // Reset review state when category changes or view is left
+    useEffect(() => {
+        if (view !== 'review') {
+            setCurrentCategory(null);
+            setReviewQueue([]);
+        }
+        setCurrentCardIndex(0);
+        setIsFlipped(false);
+    }, [currentCategory, view]);
+
+    // --- HANDLERS ---
+    const handleNavigate = (targetView: View) => {
+        setEditingCard(null); // Clear any editing state when changing views
+        setSelectedDeck(null); // Clear deck selection
+        setPracticeDeck(null); // Clear practice mode
+        setView(targetView);
+    };
+
+    const handleSelectCategory = (category: string) => {
+        let queue = dueCards.filter(c => c.category === category);
+    
+        // Apply sorting from settings
+        switch (reviewSettings.order) {
+            case 'random':
+                // Create a copy before shuffling
+                queue = [...queue].sort(() => Math.random() - 0.5);
+                break;
+            case 'newestFirst':
+                // Assuming higher ID means newer card
+                queue.sort((a, b) => b.id - a.id);
+                break;
+            case 'default':
+            default:
+                queue.sort((a, b) => new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime()); // oldest due first
+                break;
+        }
+    
+        // Apply daily limit if it's a positive number
+        if (reviewSettings.dailyLimit > 0) {
+            queue = queue.slice(0, reviewSettings.dailyLimit);
+        }
+    
+        setReviewQueue(queue);
+        setCurrentCardIndex(0);
+        setCurrentCategory(category);
+    };
+
+    const handleShowAnswer = () => setIsFlipped(true);
+
+    const handleFeedback = (quality: FeedbackType) => {
+        if (!currentCard) return;
+        
+        const feedbackClass = `feedback-${quality}`;
+        setFeedbackState(feedbackClass);
+        playFeedbackSound(quality);
+
+        const updatedSrs = calculateSuperMemo2(currentCard, quality);
+        const updatedCard = { ...currentCard, ...updatedSrs };
+        const isCorrect = quality === 'good' || quality === 'easy';
+
+        setTimeout(() => {
+            setCards(prev => prev.map(c => c.id === currentCard.id ? updatedCard : c));
+            
+             // Log the review for stats
+            const todayStr = new Date().toISOString().split('T')[0];
+            setStudyHistory(prev => {
+                const todayEntryIndex = prev.findIndex(d => d.date === todayStr);
+                if (todayEntryIndex > -1) {
+                    const newHistory = [...prev];
+                    const updatedEntry = {
+                        ...newHistory[todayEntryIndex],
+                        reviewed: newHistory[todayEntryIndex].reviewed + 1,
+                        correct: isCorrect ? newHistory[todayEntryIndex].correct + 1 : newHistory[todayEntryIndex].correct,
+                    };
+                    newHistory[todayEntryIndex] = updatedEntry;
+                    return newHistory;
+                } else {
+                    return [...prev, { date: todayStr, reviewed: 1, correct: isCorrect ? 1 : 0 }];
+                }
+            });
+
+            setCurrentCardIndex(prev => prev + 1);
+            
+            setIsFlipped(false);
+            setFeedbackState('');
+        }, 550); // Duration should match CSS animation
+    };
+    
+    const handleSwipeFeedback = (direction: 'left' | 'right' | 'up') => {
+        if (direction === 'left') {
+            handleFeedback('again');
+        } else if (direction === 'right') {
+            handleFeedback('good');
+        } else if (direction === 'up') {
+            handleFeedback('easy');
+        }
+    };
+
+    const handleAddOrUpdateCard = (newOrUpdatedCardData: Card | Omit<Card, 'id'>) => {
+        let cardToSave: Card;
+
+        if ('id' in newOrUpdatedCardData) { // Editing existing card
+            cardToSave = newOrUpdatedCardData as Card;
+            setCards(prevCards => prevCards.map(c => c.id === cardToSave.id ? cardToSave : c));
+        } else { // Adding new card
+            const newId = cards.length > 0 ? Math.max(...cards.map(c => c.id)) + 1 : 1;
+            cardToSave = { ...newOrUpdatedCardData, id: newId } as Card;
+            setCards(prevCards => [...prevCards, cardToSave]);
+            sessionStorage.setItem('lastAddedCardId', String(newId));
+        }
+    };
+    
+    const handleBulkAddCards = (newCardsData: Omit<Card, 'id' | 'repetitions' | 'easinessFactor' | 'interval' | 'dueDate'>[]) => {
+        let maxId = cards.length > 0 ? Math.max(...cards.map(c => c.id)) + 1 : 1;
+        const today = new Date().toISOString();
+        const initialSrsState = { repetitions: 0, easinessFactor: 2.5, interval: 0, dueDate: today };
+
+        const cardsToSave: Card[] = newCardsData.map(newCard => ({
+            ...initialSrsState,
+            ...newCard,
+            id: maxId++,
+        }));
+
+        const newDeckNames = new Set(cardsToSave.map(c => c.category));
+        const existingDeckNamesLower = new Set(existingCategories.map(c => c.toLowerCase()));
+
+        const placeholderCards = [...newDeckNames]
+            .filter(name => !existingDeckNamesLower.has(name.toLowerCase()))
+            .map(deckName => ({
+                id: maxId++,
+                front: 'placeholder',
+                back: 'placeholder',
+                category: deckName,
+                repetitions: -1,
+                easinessFactor: -1,
+                interval: -1,
+                dueDate: '',
+            }));
+
+        setCards(prev => [...prev.filter(c => c.repetitions !== -1), ...cardsToSave, ...placeholderCards]);
+    };
+
+    const handleEditCard = (card: Card) => {
+        setEditingCard(card);
+        setView('add');
+    };
+
+    const handleDeleteCard = (id: number) => {
         setModalConfig({
             type: 'confirm',
-            title: 'Mover Cartão para...',
-            message: (
-                <div className="form-group">
-                    <label>Selecione o baralho de destino:</label>
-                    <select id="move-card-select" className="dialog-select" defaultValue={otherDecks[0].name}>
-                        {otherDecks.map(d => <option key={d.name} value={d.name}>{d.name}</option>)}
-                    </select>
-                </div>
-            ),
-            confirmText: 'Mover',
+            title: 'Apagar Carta?',
+            message: 'Tem certeza que deseja apagar esta carta permanentemente?',
+            confirmText: 'Apagar',
+            isDestructive: true,
             onConfirm: () => {
-                const select = document.getElementById('move-card-select') as HTMLSelectElement;
-                const newDeckName = select.value;
-                if (newDeckName) {
-                    trackEvent('move_card', { from_deck: cardToMove.category, to_deck: newDeckName });
-                    setCards(prev => prev.map(c => c.id === cardId ? { ...c, category: newDeckName } : c));
+                setCards(prev => prev.filter(c => c.id !== id));
+                setEditingCard(null); // Clear editing state
+                setView('decks'); // Go back to the deck list
+            },
+        });
+    };
+
+    const handleMoveCard = (card: Card) => {
+        setMovingCard(card);
+    };
+
+    const handleConfirmMoveCard = (cardId: number, newCategory: string) => {
+        setCards(prev => prev.map(c => c.id === cardId ? { ...c, category: newCategory } : c));
+        setMovingCard(null);
+    };
+    
+    const handleRenameDeck = (oldName: string, newName: string) => {
+        setModalConfig({
+            type: 'prompt',
+            title: `Renomear "${oldName}"`,
+            message: 'Digite o novo nome para este baralho.',
+            initialValue: oldName,
+            confirmText: 'Renomear',
+            onConfirm: (newDeckName) => {
+                if (newDeckName && newDeckName.trim() !== oldName) {
+                    if (existingCategories.some(c => c.toLowerCase() === newDeckName.trim().toLowerCase())) {
+                        alert(`Um baralho chamado "${newDeckName}" já existe.`);
+                        return;
+                    }
+                    setCards(prev => prev.map(c => c.category === oldName ? { ...c, category: newDeckName.trim() } : c));
                 }
             },
         });
     };
-  
-    const handleSaveNewDeck = (initialName: string = '') => {
-        setModalConfig({
-            type: 'prompt',
-            title: initialName ? 'Renomear Baralho' : 'Novo Baralho',
-            message: 'Digite o nome do baralho:',
-            initialValue: initialName,
-            confirmText: 'Salvar',
-            onConfirm: (deckName) => {
-                if (!deckName || !deckName.trim()) return;
-                deckName = deckName.trim();
-                
-                if (decks.some(d => d.name.toLowerCase() === deckName.toLowerCase() && d.name !== initialName)) {
-                    alert('Um baralho com este nome já existe.');
-                    return;
-                }
-                
-                if (initialName) { // Renaming
-                    trackEvent('rename_deck', { old_name: initialName, new_name: deckName });
-                    setCards(prev => prev.map(c => c.category === initialName ? { ...c, category: deckName } : c));
-                } else { // Creating new
-                    trackEvent('create_deck', { deck_name: deckName });
-                    // To "create" a deck, we just need to be ready to assign cards to it.
-                    // A deck with no cards doesn't exist in our data model.
-                    // We can switch to the 'add' view with this new deck selected.
-                    setSelectedDeckForAdd(deckName);
-                    navigateTo('add');
-                }
-            }
-        });
-    };
-
+    
     const handleDeleteDeck = (deckName: string) => {
         setModalConfig({
             type: 'confirm',
-            title: `Excluir "${deckName}"?`,
-            message: 'Todos os cartões neste baralho serão permanentemente excluídos. Esta ação não pode ser desfeita.',
-            confirmText: 'Excluir Baralho',
+            title: `Apagar "${deckName}"?`,
+            message: 'Isso apagará o baralho e todas as cartas dentro dele permanentemente. Esta ação não pode ser desfeita.',
+            confirmText: 'Apagar Tudo',
             isDestructive: true,
             onConfirm: () => {
-                trackEvent('delete_deck', { deck_name: deckName });
-                setCards(prev => prev.filter(c => c.category !== deckName));
+                const itemEl = document.getElementById(`deck-item-${deckName.replace(/\s+/g, '-')}`);
+                if (itemEl) {
+                    itemEl.classList.add('is-deleting');
+                    setTimeout(() => {
+                         setCards(prev => prev.filter(c => c.category !== deckName));
+                    }, 500);
+                } else {
+                     setCards(prev => prev.filter(c => c.category !== deckName));
+                }
             }
         });
     };
-
-  const handleFeedback = (card: Card, feedback: FeedbackType) => {
-    trackEvent('review_feedback', { category: card.category, feedback_type: feedback });
     
-    let newRepetitions = card.repetitions;
-    let newEasinessFactor = card.easinessFactor;
-    let newInterval = card.interval;
+    const handleAddNewDeck = () => {
+         setModalConfig({
+            type: 'prompt',
+            title: 'Criar Novo Baralho',
+            message: 'Digite o nome para o seu novo baralho.',
+            confirmText: 'Criar',
+            onConfirm: (deckName) => {
+                if (deckName) {
+                    if (existingCategories.some(c => c.toLowerCase() === deckName.trim().toLowerCase())) {
+                        alert(`Um baralho chamado "${deckName}" já existe.`);
+                        return;
+                    }
+                    
+                    // Add a placeholder to make the deck appear, even if empty
+                    const placeholderCard: Omit<Card, 'id'> = {
+                        front: 'placeholder', back: 'placeholder', category: deckName.trim(), 
+                        repetitions: -1, easinessFactor: -1, interval: -1, dueDate: ''
+                    };
 
-    const todayStr = getTodaysDateString();
-    setStudyHistory(prev => {
-        const today = prev.find(d => d.date === todayStr);
-        if (today) {
-            return prev.map(d => d.date === todayStr ? { ...d, reviewed: d.reviewed + 1, correct: d.correct + (feedback !== 'again' ? 1 : 0) } : d);
-        } else {
-            return [...prev, { date: todayStr, reviewed: 1, correct: (feedback !== 'again' ? 1 : 0) }];
+                    const newId = cards.length > 0 ? Math.max(...cards.map(c => c.id)) + 1 : 1;
+                    const cardToSave = { ...placeholderCard, id: newId } as Card;
+                    
+                    setCards(prev => [...prev, cardToSave]);
+                    setSelectedDeck(deckName.trim());
+                    setView('decks');
+                }
+            },
+        });
+    };
+
+    const handleShareDeck = (deckName: string) => {
+        setDeckToShare(deckName);
+    };
+
+    const handleConfirmShare = async (description: string, author: string) => {
+        if (!deckToShare) return;
+
+        setIsLoading(true);
+        const remoteExists = await communityApi.checkDeckExists(deckToShare);
+        if (remoteExists) {
+            setIsLoading(false);
+            alert(`Um baralho com o nome "${deckToShare}" já foi compartilhado na comunidade. Por favor, renomeie o seu baralho se quiser compartilhá-lo.`);
+            setDeckToShare(null);
+            return;
         }
-    });
 
-    if (feedback === 'again') {
-      newRepetitions = 0;
-      newInterval = 1; // Show again tomorrow
-    } else {
-      newRepetitions += 1;
-      if (feedback === 'good') {
-          newEasinessFactor = card.easinessFactor; // No change
-      } else if (feedback === 'easy') {
-          newEasinessFactor = card.easinessFactor + 0.15;
-      }
-      
-      if (newRepetitions === 1) {
-          newInterval = 1;
-      } else if (newRepetitions === 2) {
-          newInterval = 6;
-      } else {
-          newInterval = Math.ceil(card.interval * newEasinessFactor);
-      }
-    }
-    
-    // Adjust easiness factor based on feedback, but keep it within bounds
-    if (feedback === 'again') {
-        newEasinessFactor = Math.max(1.3, card.easinessFactor - 0.2);
-    }
-    
-    const newDueDate = addDays(getTodaysDateString(), newInterval);
-    
-    const updatedCard: Card = {
-        ...card,
-        repetitions: newRepetitions,
-        easinessFactor: newEasinessFactor,
-        interval: newInterval,
-        dueDate: newDueDate,
+        const cardsToShare = cards.filter(c => c.category === deckToShare && c.repetitions !== -1);
+        const deckData = { name: deckToShare, description, author };
+
+        const result = await communityApi.uploadDeck(deckData, cardsToShare);
+        setIsLoading(false);
+        setDeckToShare(null);
+
+        if (result.success) {
+            alert(`Baralho "${deckToShare}" compartilhado com a comunidade com sucesso!`);
+        } else {
+            alert(`Falha ao compartilhar o baralho: ${result.message || 'Erro desconhecido.'}`);
+        }
+    };
+
+
+    const handleSettingsChange = (newSettings: Partial<ReviewSettings>) => {
+        setReviewSettings(prev => {
+            const updated = { ...prev, ...newSettings };
+            localStorage.setItem('gaku-review-settings', JSON.stringify(updated));
+            return updated;
+        });
+    };
+
+    const handleBackup = (): string => {
+        const data = {
+            cards: cards.filter(c => c.repetitions !== -1), // Don't backup placeholders
+            studyHistory: studyHistory,
+            reviewSettings: reviewSettings,
+        };
+        return btoa(unescape(encodeURIComponent(JSON.stringify(data))));
+    };
+
+    const handleRestore = (data: string) => {
+        try {
+            const decoded = decodeURIComponent(escape(atob(data)));
+            const parsed = JSON.parse(decoded);
+            if (parsed.cards && Array.isArray(parsed.cards)) {
+                setCards(parsed.cards);
+                if (parsed.studyHistory) setStudyHistory(parsed.studyHistory);
+                if (parsed.reviewSettings) handleSettingsChange(parsed.reviewSettings);
+            } else {
+                throw new Error("Formato de dados inválido.");
+            }
+        } catch (e) {
+            alert('Código de backup inválido ou corrompido.');
+            console.error("Restore failed:", e);
+        }
     };
     
-    setCards(prev => prev.map(c => c.id === card.id ? updatedCard : c));
-  };
-
-  const handleSaveSettings = (newSettings: ReviewSettings) => {
-    trackEvent('save_settings', { order: newSettings.order, daily_limit: newSettings.dailyLimit });
-    setReviewSettings(newSettings);
-  };
-  
-  const handleExport = () => {
-    trackEvent('export_data');
-    const data = {
-        cards,
-        studyHistory,
-        reviewSettings
+    const exportToCsv = (data: Card[], fileName: string) => {
+        const headers = ['front', 'back', 'category'];
+        const csvContent = "data:text/csv;charset=utf-8,"
+            + [
+                headers.join(','),
+                ...data.map(card => headers.map(header => `"${String(card[header as keyof Card]).replace(/"/g, '""')}"`).join(','))
+            ].join('\n');
+        
+        const link = document.createElement('a');
+        link.setAttribute('href', encodeURI(csvContent));
+        link.setAttribute('download', `${fileName}.csv`);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
     };
-    const json = JSON.stringify(data);
-    const blob = new Blob([json], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `gaku_backup_${getTodaysDateString()}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-  };
 
-  const handleRestore = (json: string) => {
-      setModalConfig({
-        type: 'confirm',
-        title: 'Restaurar Backup?',
-        message: 'Isso substituirá todos os seus dados atuais. Esta ação não pode ser desfeita.',
-        confirmText: 'Restaurar',
-        isDestructive: true,
-        onConfirm: () => {
+    const handleExportCsv = () => {
+        exportToCsv(cards.filter(c => c.repetitions !== -1), 'gaku_backup_total');
+    };
+    
+    const handleExportDeck = (deckName: string) => {
+        const deckCards = cards.filter(c => c.category === deckName && c.repetitions !== -1);
+        const fileName = `gaku_baralho_${deckName.replace(/\s+/g, '_')}`;
+        exportToCsv(deckCards, fileName);
+    };
+    
+    const handleExportJson = () => {
+        const data = {
+            cards: cards.filter(c => c.repetitions !== -1),
+            studyHistory: studyHistory,
+            reviewSettings: reviewSettings,
+        };
+        const jsonString = `data:text/json;charset=utf-8,${encodeURIComponent(JSON.stringify(data, null, 2))}`;
+        const link = document.createElement('a');
+        link.setAttribute('href', jsonString);
+        link.setAttribute('download', 'gaku_backup.json');
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    };
+
+    const handleImportFile = (file: File) => {
+        const reader = new FileReader();
+
+        reader.onload = (e) => {
+            const text = e.target?.result as string;
             try {
-                const data = JSON.parse(json);
-                if (data.cards && data.studyHistory && data.reviewSettings) {
-                    trackEvent('restore_data_success');
-                    setCards(data.cards);
-                    setStudyHistory(data.studyHistory);
-                    setReviewSettings(data.reviewSettings);
-                    navigateTo('review');
-                } else {
-                     trackEvent('restore_data_fail', { reason: 'invalid_format' });
-                    alert('Arquivo de backup inválido.');
+                if (file.name.toLowerCase().endsWith('.csv')) {
+                    const rows = text.split('\n').slice(1); // ignore header
+                    if (rows.length === 0) throw new Error("Arquivo CSV vazio ou inválido.");
+                    
+                    let maxId = cards.length > 0 ? Math.max(...cards.map(c => c.id)) : 0;
+                    const today = new Date().toISOString();
+                    const initialSrsState = { repetitions: 0, easinessFactor: 2.5, interval: 0, dueDate: today };
+
+                    const newCards = rows.map((row) => {
+                        if (!row.trim()) return null;
+                        const columns = row.match(/(".*?"|[^",\r\n]+)(?=\s*,|\s*$)/g)?.map(col => col.replace(/"/g, '')) || [];
+                        if (columns.length >= 2) {
+                            maxId++;
+                            return {
+                                id: maxId,
+                                front: columns[0] || '',
+                                back: columns[1] || '',
+                                category: columns[2] || 'Importado',
+                                ...initialSrsState
+                            };
+                        }
+                        return null;
+                    }).filter((c): c is Card => c !== null && c.front.trim() !== '' && c.back.trim() !== '');
+
+                    if(newCards.length > 0) {
+                         setCards(prev => [...prev.filter(c => c.repetitions !== -1), ...newCards]);
+                         alert(`${newCards.length} carta(s) importada(s) com sucesso!`);
+                         setView('decks');
+                    } else {
+                         throw new Error("Nenhuma carta válida encontrada no arquivo.");
+                    }
+                } else if (file.name.toLowerCase().endsWith('.json')) {
+                    const parsed = JSON.parse(text);
+                    if (parsed.cards && Array.isArray(parsed.cards)) {
+                        setCards(parsed.cards);
+                        if (parsed.studyHistory) setStudyHistory(parsed.studyHistory);
+                        if (parsed.reviewSettings) handleSettingsChange(parsed.reviewSettings);
+                        alert('Dados restaurados com sucesso do arquivo JSON!');
+                        setView('review'); // Go to a neutral view
+                    } else {
+                        throw new Error("Formato de dados JSON inválido.");
+                    }
                 }
             } catch (error) {
-                 trackEvent('restore_data_fail', { reason: 'parse_error' });
-                alert('Erro ao ler o arquivo de backup.');
-                console.error("Restore error:", error);
+                console.error("Erro ao importar arquivo:", error);
+                alert(`Falha ao importar o arquivo. Verifique se o formato está correto e o conteúdo não está corrompido.`);
             }
-        },
-    });
-  };
+        };
 
-  const handleResetApp = () => {
-     setModalConfig({
-        type: 'confirm',
-        title: 'Apagar TODOS os dados?',
-        message: 'Tem certeza? Todo o seu progresso e todos os cartões serão perdidos para sempre.',
-        confirmText: 'Sim, apagar tudo',
-        isDestructive: true,
-        onConfirm: () => {
-            trackEvent('reset_application');
-            setCards([]);
-            setStudyHistory([]);
-            setReviewSettings({ order: 'default', dailyLimit: 50 });
-            localStorage.clear(); // Extreme measure
-            navigateTo('review');
-        },
-    });
-  };
+        reader.onerror = () => {
+            alert("Não foi possível ler o arquivo.");
+        };
 
-    const handleBulkAdd = (deckName: string) => {
-        trackEvent('navigate_to_bulk_add', { from_deck: deckName });
-        setSelectedDeckForAdd(deckName);
-        navigateTo('bulk-add');
+        if (file.name.toLowerCase().endsWith('.csv')) {
+            if (confirm('Importar um arquivo CSV irá adicionar as cartas ao seu baralho existente ou criar novos baralhos. Continuar?')) {
+                reader.readAsText(file, 'UTF-8');
+            }
+        } else if (file.name.toLowerCase().endsWith('.json')) {
+            if (confirm('Restaurar de um arquivo JSON substituirá todos os seus baralhos, histórico e configurações atuais. Tem certeza que deseja continuar?')) {
+                reader.readAsText(file, 'UTF-8');
+            }
+        } else {
+            alert("Formato de arquivo não suportado. Por favor, selecione um arquivo .csv ou .json.");
+        }
     };
 
-    const handleSaveBulkCards = (deckName: string, text: string) => {
-        const lines = text.split('\n').filter(line => line.trim() !== '');
-        const newCards: Card[] = lines.map((line, index) => {
-            const parts = line.split(/[;\t]/); // Split by semicolon or tab
-            const front = parts[0]?.trim() || '';
-            const back = parts.slice(1).join(';').trim() || '';
 
-            if (!front || !back) return null;
+    const handleImportCommunityDeck = (deck: PublicDeck, communityCards: PublicCard[]) => {
+        let maxId = cards.length > 0 ? Math.max(...cards.map(c => c.id)) : 0;
+        const today = new Date().toISOString();
+        const initialSrsState = { repetitions: 0, easinessFactor: 2.5, interval: 0, dueDate: today };
 
+        const localCardsInDeck = cards.filter(c => c.category.toLowerCase() === deck.name.toLowerCase());
+        
+        const newCardsToAdd = communityCards.filter(communityCard => 
+            !localCardsInDeck.some(localCard => localCard.front.toLowerCase() === communityCard.front.toLowerCase())
+        ).map(communityCard => {
+            maxId++;
             return {
-                id: Date.now() + index,
-                front,
-                back,
-                category: deckName,
-                repetitions: 0,
-                easinessFactor: 2.5,
-                interval: 0,
-                dueDate: getTodaysDateString(),
+                ...initialSrsState,
+                id: maxId,
+                front: communityCard.front,
+                back: communityCard.back,
+                category: deck.name, // Use the original casing
             };
-        }).filter((card): card is Card => card !== null);
+        });
 
-        if (newCards.length > 0) {
-            trackEvent('save_bulk_cards', { deck_name: deckName, count: newCards.length });
-            setCards(prev => [...prev, ...newCards]);
+        if (newCardsToAdd.length > 0) {
+            setCards(prev => [...prev.filter(c => c.repetitions !== -1), ...newCardsToAdd]);
+            alert(`${newCardsToAdd.length} nova(s) carta(s) adicionada(s) ao baralho "${deck.name}"!`);
+        } else {
+            alert(`O baralho "${deck.name}" já está atualizado com todas as cartas da comunidade.`);
         }
-        navigateTo('decks');
-        // A slight delay to allow the view to change before viewing the deck
-        setTimeout(() => {
-            const deckListView = document.querySelector('.decks-view');
-            if(deckListView) {
-                // This is a bit of a hack to trigger the view change inside DecksView
-                // A better solution would involve a more robust navigation system.
+        setView('decks');
+        setSelectedDeck(deck.name);
+    };
+
+    const toggleTheme = () => setTheme(prev => prev === 'light' ? 'dark' : 'light');
+
+    const renderContent = () => {
+        if (isLoading && !deckToShare) return <Loader />; // Full screen loader, except for share modal
+        if (isOnboarding) return null; // Tour handles its own UI
+        
+        if (practiceDeck) {
+            return <PracticeView cards={cardsInPracticeDeck} deckName={practiceDeck} onEnd={() => setPracticeDeck(null)} />;
+        }
+        
+        if (view === 'add') {
+            return <AddCardForm 
+                onAddCard={handleAddOrUpdateCard}
+                onEditCard={handleAddOrUpdateCard}
+                onDeleteCard={handleDeleteCard}
+                existingCategories={existingCategories}
+                editingCard={editingCard}
+                onDone={() => { setEditingCard(null); setView('decks'); }}
+                onNavigate={handleNavigate}
+            />;
+        }
+
+        if (view === 'bulk-add') {
+            return <BulkAddView 
+                onBulkAdd={handleBulkAddCards} 
+                onNavigate={handleNavigate} 
+                existingCategories={existingCategories} 
+            />;
+        }
+
+        if (view === 'decks') {
+            if (selectedDeck) {
+                return <DeckCardList 
+                    deckName={selectedDeck} 
+                    cards={cardsInSelectedDeck} 
+                    onBack={() => setSelectedDeck(null)}
+                    onEditCard={handleEditCard}
+                    onPractice={setPracticeDeck}
+                    onMoveCard={handleMoveCard}
+                />
             }
-        }, 100);
+            return <DeckList 
+                decks={allDecks} 
+                onSelectDeck={setSelectedDeck}
+                onRenameDeck={handleRenameDeck}
+                onDeleteDeck={handleDeleteDeck}
+                onAddNewDeck={handleAddNewDeck}
+                onExportDeck={handleExportDeck}
+                onShareDeck={handleShareDeck}
+            />;
+        }
+
+        if (view === 'settings') {
+            return <SettingsView 
+                settings={{ review: reviewSettings }}
+                onSettingsChange={handleSettingsChange}
+                onBackup={handleBackup}
+                onRestore={handleRestore}
+                onExportJson={handleExportJson}
+                onExportCsv={handleExportCsv}
+                onImport={handleImportFile}
+            />;
+        }
+
+        if (view === 'stats') {
+             return <StatsView cards={cards.filter(c => c.repetitions !== -1)} studyHistory={studyHistory} onBack={() => handleNavigate('review')} />;
+        }
+
+        if (view === 'community') {
+            return <CommunityView onDownloadDeck={handleImportCommunityDeck} localDeckNames={localDeckNamesSet} onNavigate={handleNavigate} />;
+        }
+
+        // --- Review View Logic ---
+        if (allDecks.length === 0) {
+            return <WelcomeEmptyState onAddNewDeck={handleAddNewDeck} />;
+        }
+
+        if (currentCategory && currentCard) {
+            return (
+                <div className="review-view">
+                    <Flashcard
+                        card={currentCard}
+                        isFlipped={isFlipped}
+                        onFlip={handleShowAnswer}
+                        feedbackState={feedbackState}
+                        onSwipe={handleSwipeFeedback}
+                        mode="review"
+                    />
+                    <Controls
+                        isFlipped={isFlipped}
+                        onShowAnswer={handleShowAnswer}
+                        onFeedback={handleFeedback}
+                        progressText={`${currentCardIndex + 1} / ${reviewQueue.length}`}
+                    />
+                </div>
+            );
+        }
+
+        if (decksWithDueCounts.length > 0) {
+             return <CategorySelection decks={decksWithDueCounts} onSelectCategory={handleSelectCategory} />;
+        }
+        
+        return <SessionComplete onAddMore={() => setView('bulk-add')} onGoToDecks={() => setView('decks')} />;
     };
     
-    const handleShareDeck = (deck: DeckInfo) => {
-        const deckCards = cards.filter(c => c.category === deck.name);
-        setModalConfig({
-            type: 'prompt',
-            title: `Compartilhar "${deck.name}"`,
-            message: 'Adicione uma breve descrição para o seu baralho:',
-            initialValue: '',
-            confirmText: 'Compartilhar',
-            onConfirm: async (description) => {
-                 if (!description) {
-                    alert('A descrição é obrigatória.');
-                    return;
-                }
-                trackEvent('share_deck', { deck_name: deck.name, card_count: deckCards.length });
-                const deckData = {
-                    name: deck.name,
-                    description,
-                    author: 'Anônimo' // Placeholder for now
-                };
-                
-                // Show loader in modal
-                // This part needs a more robust modal system to show a loading state
-                
-                const exists = await communityApi.checkDeckExists(deck.name);
-                if (exists) {
-                    alert(`Um baralho chamado "${deck.name}" já existe na comunidade. Por favor, renomeie o seu baralho se quiser compartilhá-lo.`);
-                    return;
-                }
-
-                const result = await communityApi.uploadDeck(deckData, deckCards);
-                if (result.success) {
-                    alert('Baralho compartilhado com sucesso!');
-                    navigateTo('community');
-                } else {
-                    alert(`Falha ao compartilhar o baralho: ${result.message}`);
-                }
+    // --- Onboarding Tour Component ---
+    const OnboardingTour = () => {
+        const tourSteps = [
+            {
+                elementId: 'nav-review',
+                title: 'Bem-vindo ao Gaku!',
+                text: 'Esta é a tela de Revisão. Aqui você verá as cartas que precisam ser estudadas hoje com base na repetição espaçada.',
+                position: 'top',
+            },
+            {
+                elementId: 'nav-decks',
+                title: 'Gerenciar Baralhos',
+                text: 'Aqui você pode ver todas as suas cartas, editar baralhos existentes e praticar sem o sistema de repetição.',
+                position: 'top',
+            },
+            {
+                elementId: 'nav-add',
+                title: 'Adicionar Cartas',
+                text: 'Use este botão para criar novas cartas e baralhos para os seus estudos.',
+                position: 'top',
+                isRound: true,
+            },
+            {
+                elementId: 'nav-community',
+                title: 'Explore a Comunidade',
+                text: 'Baixe baralhos compartilhados por outros usuários para expandir seus estudos.',
+                position: 'top',
+            },
+            {
+                elementId: 'header-stats-btn',
+                title: 'Acompanhe seu Progresso',
+                text: 'Clique aqui a qualquer momento para ver suas estatísticas de estudo, como o histórico de revisões e o domínio das cartas.',
+                position: 'bottom',
+                isRound: true,
             }
-        });
+        ];
+        
+        const currentStep = tourSteps[onboardingStep];
+        const holeRef = useRef<HTMLDivElement>(null);
+        const tooltipRef = useRef<HTMLDivElement>(null);
+
+        useLayoutEffect(() => {
+            if (!isOnboarding || !currentStep) return;
+        
+            const targetElement = document.getElementById(currentStep.elementId);
+            const holeEl = holeRef.current;
+            const tooltipEl = tooltipRef.current;
+        
+            if (targetElement && holeEl && tooltipEl) {
+                const rect = targetElement.getBoundingClientRect();
+                const isWideScreen = window.innerWidth >= 900;
+        
+                // --- Hole Positioning ---
+                const isAddButtonOnDesktop = currentStep.elementId === 'nav-add' && isWideScreen;
+                const isHeaderButtonOnDesktop = ['header-stats-btn'].includes(currentStep.elementId) && isWideScreen;
+                
+                holeEl.style.borderRadius = (currentStep.isRound && !isAddButtonOnDesktop) || isHeaderButtonOnDesktop ? '50%' : 'var(--border-radius)';
+                holeEl.style.width = `${rect.width + 10}px`;
+                holeEl.style.height = `${rect.height + 10}px`;
+                holeEl.style.top = `${rect.top - 5}px`;
+                holeEl.style.left = `${rect.left - 5}px`;
+                holeEl.style.opacity = '1';
+                holeEl.style.visibility = 'visible';
+        
+                // --- Tooltip Positioning ---
+                tooltipEl.style.opacity = '1';
+                tooltipEl.style.visibility = 'visible';
+                tooltipEl.style.transform = 'scale(1)';
+        
+                const arrowEl = tooltipEl.querySelector('.onboarding-tooltip-arrow') as HTMLElement;
+                if (arrowEl) {
+                    arrowEl.className = 'onboarding-tooltip-arrow'; // Reset classes
+                }
+        
+                const tooltipHeight = tooltipEl.offsetHeight;
+                const tooltipWidth = tooltipEl.offsetWidth;
+                const space = 15;
+                const margin = 10;
+                const viewportWidth = window.innerWidth;
+                const viewportHeight = window.innerHeight;
+        
+                let top, left;
+        
+                if (isWideScreen) {
+                    // Desktop layout logic
+                    if (currentStep.position === 'bottom') { // For header items
+                        if (arrowEl) arrowEl.classList.add('top-arrow');
+                        top = rect.bottom + space;
+                    } else { // For sidebar items
+                        if (arrowEl) arrowEl.classList.add('left-arrow');
+                        left = rect.right + space;
+                        top = rect.top + rect.height / 2 - tooltipHeight / 2;
+                        tooltipEl.style.setProperty('--arrow-top-pos', `${tooltipHeight / 2}px`);
+                    }
+                } else {
+                    // Mobile layout logic
+                    if (currentStep.position === 'top' && rect.top - tooltipHeight - space > margin) {
+                        if (arrowEl) arrowEl.classList.add('bottom-arrow');
+                        top = rect.top - tooltipHeight - space;
+                    } else {
+                        if (arrowEl) arrowEl.classList.add('top-arrow');
+                        top = rect.bottom + space;
+                    }
+                }
+        
+                // Horizontal positioning for both mobile and desktop (when applicable)
+                if (left === undefined) {
+                    left = rect.left + rect.width / 2 - tooltipWidth / 2;
+                }
+        
+                // Boundary checks
+                if (left < margin) left = margin;
+                if (left + tooltipWidth > viewportWidth - margin) {
+                    left = viewportWidth - margin - tooltipWidth;
+                }
+                if (top < margin) top = margin;
+                if (top + tooltipHeight > viewportHeight - margin) {
+                    top = viewportHeight - margin - tooltipHeight;
+                }
+        
+                tooltipEl.style.top = `${top}px`;
+                tooltipEl.style.left = `${left}px`;
+        
+                // Arrow positioning
+                const elementCenterH = rect.left + rect.width / 2;
+                const arrowPositionH = elementCenterH - left;
+                tooltipEl.style.setProperty('--arrow-left-pos', `${arrowPositionH}px`);
+            }
+        }, [onboardingStep, isOnboarding]);
+
+        const nextStep = () => setOnboardingStep(s => Math.min(s + 1, tourSteps.length - 1));
+        const prevStep = () => setOnboardingStep(s => Math.max(s - 1, 0));
+        const endTour = () => {
+            localStorage.setItem('gaku-onboarding-complete', 'true');
+            setIsOnboarding(false);
+        };
+
+        if (!isOnboarding) return null;
+
+        return (
+             <div className="onboarding-container">
+                <div ref={holeRef} className="onboarding-hole" />
+                <div ref={tooltipRef} className="onboarding-tooltip" style={{
+                    '--arrow-top-pos': '50%', // Default values
+                    '--arrow-left-pos': '50%'
+                } as React.CSSProperties}>
+                    <div className="onboarding-tooltip-arrow" />
+                     <button onClick={endTour} className="onboarding-close-btn" aria-label="Fechar tour"><XIcon /></button>
+                    <h4>{currentStep.title}</h4>
+                    <p>{currentStep.text}</p>
+                    <div className="onboarding-nav">
+                        <div className="onboarding-dots">
+                            {tourSteps.map((_, i) => <div key={i} className={`onboarding-dot ${i === onboardingStep ? 'active' : ''}`} />)}
+                        </div>
+                        <div className="onboarding-nav-buttons">
+                           {onboardingStep > 0 && <button onClick={prevStep} className="btn btn-cancel">Anterior</button>}
+                           {onboardingStep < tourSteps.length - 1 
+                                ? <button onClick={nextStep} className="btn">Próximo</button>
+                                : <button onClick={endTour} className="btn">Começar!</button>
+                           }
+                        </div>
+                    </div>
+                </div>
+            </div>
+        );
     };
 
-    const handleDownloadDeck = async (deck: PublicDeck) => {
-        trackEvent('download_deck_start', { deck_name: deck.name });
-        setCommunityDecksLoading(true);
-        try {
-            const publicCards = await communityApi.getDeckCards(deck.name);
-            if(publicCards.length === 0) throw new Error("Deck is empty or failed to load.");
-            
-            const newCards: Card[] = publicCards.map((c, i) => ({
-                id: Date.now() + i,
-                front: c.front,
-                back: c.back,
-                category: deck.name,
-                repetitions: 0,
-                easinessFactor: 2.5,
-                interval: 0,
-                dueDate: getTodaysDateString(),
-            }));
-
-            setCards(prev => [...prev, ...newCards]);
-            trackEvent('download_deck_success', { deck_name: deck.name, card_count: newCards.length });
-            alert(`Baralho "${deck.name}" baixado com sucesso!`);
-            
-        } catch (error) {
-            trackEvent('download_deck_fail', { deck_name: deck.name });
-            alert(`Não foi possível baixar o baralho "${deck.name}".`);
-            console.error(error);
-        } finally {
-            setCommunityDecksLoading(false);
-        }
-    };
-
-  const tourSteps = [
-    {
-      target: '.review-view',
-      title: 'Bem-vindo ao Gaku!',
-      content: 'Este é o seu painel de revisão. As cartas que precisam ser estudadas aparecerão aqui todos os dias.',
-    },
-    {
-      target: '.nav-btn-add',
-      title: 'Adicionar Cartas',
-      content: 'Clique neste botão a qualquer momento para adicionar novos flashcards aos seus baralhos.',
-      shape: 'circle',
-    },
-    {
-      target: '.nav-btn[aria-label="Baralhos"]',
-      title: 'Gerenciar Baralhos',
-      content: 'Aqui você pode ver todos os seus baralhos, editar cartões, praticar e muito mais.',
-    },
-    {
-      target: '.nav-btn[aria-label="Comunidade"]',
-      title: 'Comunidade',
-      content: 'Descubra e baixe baralhos criados por outros usuários, ou compartilhe os seus!',
-    },
-    {
-        target: '.nav-btn[aria-label="Ajustes"]',
-        title: 'Ajustes',
-        content: 'Personalize sua experiência de estudo, gerencie backups e configure o aplicativo como preferir.',
-    }
-  ];
-  
-  const endTour = (fromCloseButton = false) => {
-    trackEvent('tour_ended', { step: tourStep, premature_exit: fromCloseButton });
-    setShowTour(false);
-    setTourStep(0);
-  };
-  const nextTourStep = () => {
-    if (tourStep < tourSteps.length - 1) {
-       trackEvent('tour_next_step', { from_step: tourStep, to_step: tourStep + 1 });
-       setTourStep(tourStep + 1);
-    } else {
-      endTour();
-    }
-  };
-  const prevTourStep = () => {
-    if (tourStep > 0) {
-        trackEvent('tour_prev_step', { from_step: tourStep, to_step: tourStep - 1 });
-        setTourStep(tourStep - 1);
-    }
-  };
-
-
-  const renderContent = () => {
-    switch (view) {
-      case 'review':
-        return <ReviewView 
-                    cards={dueCards} 
-                    onFeedback={handleFeedback} 
-                    onSessionComplete={() => navigateTo('decks')}
-                    onCreateDeck={() => navigateTo('add')}
-                    decksExist={decks.length > 0}
-                />;
-      case 'add':
-        return <AddCardView 
-                    onSave={handleSaveCard} 
-                    decks={decks} 
-                    initialDeck={selectedDeckForAdd}
-                    onBulkAdd={handleBulkAdd}
-                    onBack={() => navigateTo('decks')} 
-                />;
-      case 'decks':
-        return <DecksView 
-                    cards={cards} 
-                    decks={decks}
-                    onSaveCard={handleSaveCard}
-                    onDeleteCard={handleDeleteCard}
-                    onSaveDeck={handleSaveNewDeck}
-                    onDeleteDeck={handleDeleteDeck}
-                    onRenameDeck={handleSaveNewDeck}
-                    onMoveCard={handleMoveCard}
-                    onBulkAdd={handleBulkAdd}
-                    onPractice={() => {}}
-                    onShareDeck={handleShareDeck}
-                />;
-      case 'settings':
-          return <SettingsView 
-                    settings={reviewSettings}
-                    onSaveSettings={handleSaveSettings}
-                    onExport={handleExport}
-                    onRestore={handleRestore}
-                    onResetApp={handleResetApp}
-                    onShowTour={() => { trackEvent('tour_restarted'); setShowTour(true); setTourStep(0); }}
-                    theme={theme}
-                    onThemeChange={(t) => { trackEvent('toggle_theme', { to_theme: t }); setTheme(t); }}
-                 />;
-      case 'stats':
-          trackEvent('view_stats');
-          return <StatsView cards={cards} studyHistory={studyHistory} />;
-      case 'community':
-          return <CommunityView localDecks={decks} onDownloadDeck={handleDownloadDeck} navigateTo={navigateTo} />;
-      case 'bulk-add':
-          return <BulkAddView 
-                    deckName={selectedDeckForAdd || 'Geral'} 
-                    onSave={handleSaveBulkCards}
-                    onBack={() => navigateTo('decks')}
-                 />
-      default:
-        return <ReviewView cards={dueCards} onFeedback={handleFeedback} onSessionComplete={() => {}} onCreateDeck={() => navigateTo('add')} decksExist={decks.length > 0} />;
-    }
-  };
-
-  return (
-    <div className="app-container">
-        {showTour && decks.length === 0 && (
-            <OnboardingTour
-                steps={tourSteps}
-                currentStepIndex={tourStep}
-                onNext={nextTourStep}
-                onPrev={prevTourStep}
-                onEnd={endTour}
-            />
-        )}
-      <header>
-        <h1>Gaku APP</h1>
-        <div className="header-actions">
-           <IconButton onClick={() => navigateTo('stats')} title="Estatísticas">
-                <BarChartIcon />
-            </IconButton>
-           <IconButton onClick={handleThemeToggle} title={`Mudar para tema ${theme === 'light' ? 'escuro' : 'claro'}`}>
-              {theme === 'light' ? <MoonIcon /> : <SunIcon />}
-            </IconButton>
-        </div>
-      </header>
-      
-      <main className="content-wrapper">{renderContent()}</main>
-
-      <NavBar
-        activeView={view}
-        onNavigate={navigateTo}
-        reviewCount={dueCards.length}
-        onAddClick={() => {
-            setActiveCard(null);
-            setSelectedDeckForAdd(null);
-            navigateTo('add');
-        }}
-      />
-
-      {modalConfig && (
-        <Modal 
-            config={modalConfig}
-            closeModal={() => setModalConfig(null)}
-        />
-      )}
-      {communityDecksLoading && (
-        <div className="modal-overlay">
-            <Loader />
-        </div>
-      )}
-    </div>
-  );
-};
-
-const NavBar = ({ activeView, onNavigate, reviewCount, onAddClick }) => {
-    const navItems: { view: View, label: string, icon: React.ReactNode }[] = [
-        { view: 'review', label: 'Revisar', icon: <EyeIcon/> },
-        { view: 'decks', label: 'Baralhos', icon: <ListIcon/> },
-        { view: 'community', label: 'Comunidade', icon: <GlobeIcon/> },
-        { view: 'settings', label: 'Ajustes', icon: <SettingsIcon/> },
-    ];
 
     return (
-        <nav className="main-nav">
-            {navItems.slice(0, 2).map(item => (
-                <button
-                    key={item.view}
-                    className={`nav-btn ${activeView === item.view ? 'active' : ''}`}
-                    onClick={() => onNavigate(item.view)}
-                    aria-label={item.label}
-                >
-                    <span className="nav-badge-container">
-                        {item.icon}
-                        {item.view === 'review' && reviewCount > 0 && <span className="nav-badge">{reviewCount > 99 ? '99+' : reviewCount}</span>}
-                    </span>
-                    <span>{item.label}</span>
-                </button>
-            ))}
-
-            <button className="nav-btn nav-btn-add" onClick={onAddClick} aria-label="Adicionar Cartão">
-                <PlusIcon />
-                <span>Adicionar</span>
-            </button>
-            
-            {navItems.slice(2).map(item => (
-                 <button
-                    key={item.view}
-                    className={`nav-btn ${activeView === item.view ? 'active' : ''}`}
-                    onClick={() => onNavigate(item.view)}
-                    aria-label={item.label}
-                >
-                    {item.icon}
-                    <span>{item.label}</span>
-                </button>
-            ))}
-        </nav>
+        <>
+            <div className="app-container">
+                <header>
+                    <h1>Gaku APP</h1>
+                    <div className="header-actions">
+                         <StatsButton onClick={() => setView('stats')} />
+                        <DarkModeToggle theme={theme} toggleTheme={toggleTheme} />
+                    </div>
+                </header>
+                <div className="content-wrapper">
+                    {renderContent()}
+                </div>
+                 <NavBar currentView={view} onNavigate={handleNavigate} reviewCount={dueCards.length} />
+            </div>
+             {modalConfig && <CustomDialog {...modalConfig} onDismiss={() => setModalConfig(null)} />}
+             {deckToShare && (
+                <ShareDeckModal 
+                    deckName={deckToShare}
+                    onConfirm={handleConfirmShare}
+                    onCancel={() => {
+                        setDeckToShare(null);
+                        setIsLoading(false);
+                    }}
+                    isLoading={isLoading}
+                />
+             )}
+             <OnboardingTour />
+        </>
     );
 };
 
-
+// --- RENDER APP ---
 const container = document.getElementById('root');
 if (container) {
-  const root = createRoot(container);
-  root.render(<App />);
+    const root = createRoot(container);
+    root.render(<App />);
+}
+
+// Register Service Worker
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').then(registration => {
+      console.log('SW registered: ', registration);
+    }).catch(registrationError => {
+      console.log('SW registration failed: ', registrationError);
+    });
+  });
 }
