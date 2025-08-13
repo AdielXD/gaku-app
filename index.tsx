@@ -337,6 +337,7 @@ const getInitialCards = (): Card[] => {
       { id: 3, front: 'はい', back: 'Sim', category: 'Vocabulário Básico', ...initialSrsState },
       { id: 4, front: 'いいえ', back: 'Não', category: 'Vocabulário Básico', ...initialSrsState },
       { id: 5, front: '日本', back: 'Japão', category: 'Kanji', ...initialSrsState },
+      { id: 5, front: '学', back: 'Gaku - Estudar / Aprender', category: 'Kanji', ...initialSrsState },
     ];
 };
 
