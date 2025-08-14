@@ -826,7 +826,7 @@ const BulkAddView: React.FC<{
             const line = lines[i].trim();
             if (!line) continue;
 
-            const separator = line.includes(';') ? ';' : ',';
+            const separator = ';';
             const parts = line.split(separator).map(p => p.trim());
             
             const front = parts[0];
@@ -871,9 +871,9 @@ const BulkAddView: React.FC<{
                 <div className="form-instructions" style={{textAlign: 'left'}}>
                     Adicione cartas, uma por linha, no formato:
                     <br />
-                    <code>Frente, Verso, Nome do Baralho</code>
+                    <code>Frente; Verso; Nome do Baralho</code>
                     <br />
-                    O baralho é opcional. Se não o especificar, será usado o baralho padrão abaixo. Separe com <strong>vírgula (,)</strong> ou <strong>ponto e vírgula (;)</strong>.
+                    O nome do baralho é opcional. Se não o especificar, será usado o baralho padrão abaixo. Separe com <strong>ponto e vírgula (;)</strong>.
                 </div>
                 <div className="form-group">
                     <label htmlFor="bulk-cards">Cartas:</label>
