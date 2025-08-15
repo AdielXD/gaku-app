@@ -91,6 +91,7 @@ const XP_MAP = {
     newDeck: 20,
     uploadDeck: 50,
     downloadDeck: 25,
+    downloadCard: 5,
     communityContribution: 10,
 };
 
@@ -1546,15 +1547,21 @@ const PracticeView: React.FC<{
 
 const CommunityView: React.FC<{
     onDownloadDeck: (deck: PublicDeck, cards: PublicCard[]) => void;
-    localDeckNames: Set<string>;
+    onDownloadCard: (card: PublicCard, deckName: string) => void;
+    localCards: Card[];
     onNavigate: (view: View) => void;
     publicDecks: PublicDeck[];
     isLoading: boolean;
-}> = ({ onDownloadDeck, localDeckNames, onNavigate, publicDecks, isLoading }) => {
+}> = ({ onDownloadDeck, onDownloadCard, localCards, onNavigate, publicDecks, isLoading }) => {
     const [downloading, setDownloading] = useState<string | null>(null);
     const [modalConfig, setModalConfig] = useState<ModalConfig | null>(null);
+    const [expandedDeck, setExpandedDeck] = useState<PublicDeck | null>(null);
+    const [deckCards, setDeckCards] = useState<PublicCard[]>([]);
+    const [areCardsLoading, setAreCardsLoading] = useState(false);
+    
+    const localDeckNamesSet = useMemo(() => new Set(localCards.map(c => c.category.toLowerCase())), [localCards]);
 
-    const handleDownload = async (deck: PublicDeck) => {
+    const handleDownloadAll = async (deck: PublicDeck) => {
         setDownloading(deck.name);
         const cards = await communityApi.getDeckCards(deck.name);
         setDownloading(null);
@@ -1564,20 +1571,15 @@ const CommunityView: React.FC<{
             return;
         }
 
-        const handleConfirmDownload = () => {
-            onDownloadDeck(deck, cards);
-            // This is now handled by the parent component's state, but we can optimistically update for immediate feedback
-            // This requires the parent to pass down a setter or handle it differently.
-            // For now, we'll rely on the parent's state management to eventually reflect the change.
-        };
+        const handleConfirmDownload = () => onDownloadDeck(deck, cards);
 
-        const localDeckExists = localDeckNames.has(deck.name.toLowerCase());
+        const localDeckExists = localDeckNamesSet.has(deck.name.toLowerCase());
         
         if (localDeckExists) {
              setModalConfig({
                 type: 'confirm',
-                title: 'Baralho já existe',
-                message: `Você já tem um baralho chamado "${deck.name}". Baixar este baralho irá adicionar as cartas da comunidade a ele. As cartas duplicadas serão ignoradas. Deseja continuar?`,
+                title: 'Atualizar Baralho?',
+                message: `Você já tem um baralho chamado "${deck.name}". Baixar este baralho irá adicionar as cartas da comunidade que você ainda não tem. Deseja continuar?`,
                 confirmText: 'Continuar',
                 onConfirm: handleConfirmDownload,
             });
@@ -1585,6 +1587,76 @@ const CommunityView: React.FC<{
             handleConfirmDownload();
         }
     };
+    
+    const handleExpandDeck = async (deck: PublicDeck) => {
+        setExpandedDeck(deck);
+        setAreCardsLoading(true);
+        const cards = await communityApi.getDeckCards(deck.name);
+        setAreCardsLoading(false);
+        if (cards && cards.length > 0) {
+            setDeckCards(cards);
+        } else {
+            alert(`Não foi possível carregar as cartas para "${deck.name}" ou o baralho está vazio.`);
+            setExpandedDeck(null);
+        }
+    };
+
+    if (expandedDeck) {
+        const localCardsInThisDeck = localCards.filter(c => c.category.toLowerCase() === expandedDeck.name.toLowerCase());
+        const allCardsDownloaded = deckCards.every(communityCard => 
+            localCardsInThisDeck.some(lc => lc.front.toLowerCase() === communityCard.front.toLowerCase())
+        );
+
+        return (
+            <div className="deck-card-list-view">
+                 <div className="deck-card-list-header">
+                    <button onClick={() => setExpandedDeck(null)} className="back-btn" aria-label="Voltar para comunidade"><ArrowLeftIcon/></button>
+                    <div className="deck-card-list-title">
+                         <h2>{expandedDeck.name}</h2>
+                    </div>
+                    <div className="deck-card-list-actions">
+                         <button 
+                             className="btn btn-practice"
+                             onClick={() => handleDownloadAll(expandedDeck)}
+                             disabled={downloading !== null || allCardsDownloaded}
+                         >
+                            <CloudDownloadIcon/> {allCardsDownloaded ? 'Tudo baixado' : 'Baixar Tudo'}
+                        </button>
+                    </div>
+                </div>
+                {areCardsLoading ? <Loader /> : (
+                    <ul className="all-cards-list">
+                        {deckCards.map(card => {
+                            const isDownloaded = localCardsInThisDeck.some(lc => lc.front.toLowerCase() === card.front.toLowerCase());
+                            return (
+                                <li key={`${card.front}-${card.back}`} className="card-list-item">
+                                    <div className="card-list-text">
+                                        <span className="card-list-front">{card.front}</span>
+                                        <span className="card-list-back">{card.back}</span>
+                                    </div>
+                                    <div className="card-list-actions">
+                                        {isDownloaded ? (
+                                            <button className="deck-action-btn owned" title="Você já possui esta carta" disabled>
+                                                <CheckCircleIcon/>
+                                            </button>
+                                        ) : (
+                                            <button 
+                                                onClick={() => onDownloadCard(card, expandedDeck.name)} 
+                                                className="deck-action-btn download" 
+                                                title={`Baixar carta (+${XP_MAP.downloadCard} XP)`}
+                                            >
+                                                <CloudDownloadIcon/>
+                                            </button>
+                                        )}
+                                    </div>
+                                </li>
+                            );
+                        })}
+                    </ul>
+                )}
+            </div>
+        );
+    }
 
     return (
         <div className="decks-view">
@@ -1596,11 +1668,9 @@ const CommunityView: React.FC<{
                 <>
                     {publicDecks.length > 0 ? (
                         <ul className="deck-list">
-                            {publicDecks.map((deck) => {
-                                const isOwned = localDeckNames.has(deck.name.toLowerCase());
-                                return (
+                            {publicDecks.map((deck) => (
                                 <li key={deck.id || deck.name} className="deck-list-item">
-                                    <div className="deck-item-main" style={{ cursor: 'default', flexDirection: 'column', alignItems: 'flex-start', gap: '8px' }}>
+                                    <div className="deck-item-main" onClick={() => handleExpandDeck(deck)} style={{ cursor: 'pointer', flexDirection: 'column', alignItems: 'flex-start', gap: '8px' }}>
                                         <div style={{width: '100%', display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
                                             <div className="deck-name">{deck.name}</div>
                                             <div className="deck-card-count">{deck.cardCount} cartas</div>
@@ -1612,23 +1682,17 @@ const CommunityView: React.FC<{
                                         </div>
                                     </div>
                                     <div className="deck-item-actions">
-                                        {isOwned ? (
-                                             <button className="deck-action-btn owned" title="Você já possui este baralho" disabled>
-                                                <CheckCircleIcon/>
-                                            </button>
-                                        ) : (
-                                            <button 
-                                                onClick={() => handleDownload(deck)} 
-                                                className="deck-action-btn download" 
-                                                title={`Baixar ${deck.name} (+${XP_MAP.downloadDeck} XP)`}
-                                                disabled={downloading !== null}
-                                            >
-                                                {downloading === deck.name ? <Loader isSmall={true} /> : <CloudDownloadIcon/>}
-                                            </button>
-                                        )}
+                                        <button 
+                                            onClick={(e) => { e.stopPropagation(); handleDownloadAll(deck); }} 
+                                            className="deck-action-btn download" 
+                                            title={`Baixar todo o baralho ${deck.name} (+${XP_MAP.downloadDeck} XP)`}
+                                            disabled={downloading !== null}
+                                        >
+                                            {downloading === deck.name ? <Loader isSmall={true} /> : <CloudDownloadIcon/>}
+                                        </button>
                                     </div>
                                 </li>
-                            )})}
+                            ))}
                         </ul>
                     ) : (
                         <div className="empty-state-container">
@@ -1864,7 +1928,6 @@ const App = () => {
             .sort((a, b) => a.name.localeCompare(b.name));
     }, [cards]);
     
-    const localDeckNamesSet = useMemo(() => new Set(allDecks.map(d => d.name.toLowerCase())), [allDecks]);
     const existingCategories = useMemo(() => allDecks.map(d => d.name), [allDecks]);
     
     const cardsInSelectedDeck = useMemo(() => {
@@ -2549,6 +2612,37 @@ const App = () => {
         setSelectedDeck(deck.name);
     };
 
+    const handleImportSingleCard = (card: PublicCard, deckName: string) => {
+        const targetDeckName = existingCategories.find(c => c.toLowerCase() === deckName.toLowerCase()) || deckName;
+    
+        const cardExists = cards.some(c => 
+            c.category.toLowerCase() === deckName.toLowerCase() &&
+            c.front.toLowerCase().trim() === card.front.toLowerCase().trim()
+        );
+    
+        if (cardExists) {
+            alert(`A carta "${card.front}" já existe no seu baralho "${targetDeckName}".`);
+            return;
+        }
+    
+        let maxId = cards.length > 0 ? Math.max(...cards.map(c => c.id)) + 1 : 1;
+        const today = new Date().toISOString();
+        const initialSrsState = { repetitions: 0, easinessFactor: 2.5, interval: 0, dueDate: today };
+        
+        const newCard: Card = {
+            ...initialSrsState,
+            id: maxId,
+            front: card.front,
+            back: card.back,
+            category: targetDeckName,
+        };
+    
+        // When we add a new card to a new deck, we should remove the placeholder for that deck if it exists.
+        setCards(prev => [...prev.filter(c => !(c.repetitions === -1 && c.category.toLowerCase() === targetDeckName.toLowerCase())), newCard]);
+        alert(`Carta "${card.front}" adicionada ao baralho "${targetDeckName}"!`);
+        grantXp(XP_MAP.downloadCard);
+    };
+
     const handleRequestNotificationPermission = async () => {
         const status = await requestNotificationPermission();
         setNotificationPermission(status);
@@ -2647,7 +2741,8 @@ const App = () => {
         if (view === 'community') {
             return <CommunityView 
                 onDownloadDeck={handleImportCommunityDeck} 
-                localDeckNames={localDeckNamesSet} 
+                onDownloadCard={handleImportSingleCard}
+                localCards={cards} 
                 onNavigate={handleNavigate}
                 publicDecks={publicDecks}
                 isLoading={arePublicDecksLoading}
