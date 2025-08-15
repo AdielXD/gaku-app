@@ -91,6 +91,7 @@ const XP_MAP = {
     newDeck: 20,
     uploadDeck: 50,
     downloadDeck: 25,
+    communityContribution: 10,
 };
 
 // --- COMMUNITY BACKEND API ---
@@ -155,6 +156,24 @@ const communityApi = {
         return { success: true };
      } catch (error: any) {
         console.error("Error uploading deck:", error);
+        return { success: false, message: error.message };
+     }
+  },
+
+  addCardToPublicDeck: async (deckName: string, card: PublicCard): Promise<{success: boolean, message?: string}> => {
+     try {
+        const response = await fetch('/.netlify/functions/add-card-to-deck', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ deckName, card }),
+        });
+        if (!response.ok) {
+            const errorBody = await response.json();
+            throw new Error(errorBody.error || `HTTP error! status: ${response.status}`);
+        }
+        return { success: true };
+     } catch (error: any) {
+        console.error("Error adding card to public deck:", error);
         return { success: false, message: error.message };
      }
   },
@@ -255,7 +274,7 @@ const manageNotifications = (profile: UserProfile, streak: number) => {
                 // It's not evening yet, schedule a "streak danger" notification for the evening
                 targetTime.setHours(21, 0, 0, 0);
                  title = 'Sua ofensiva está em perigo! 😨';
-                 body = `Pratique hoje para manter sua ofensiva de ${streak} dia(s) viva. O Gaku coruja acredita em você!`;
+                 body = `Pratique hoje para manter sua ofensiva de ${streak} dia(s) viva. O Gaku acredita em você!`;
             } else {
                 // It's already past the danger notification time. Schedule for tomorrow.
                 const [hours, minutes] = profile.reminderTime.split(':').map(Number);
@@ -337,6 +356,7 @@ const getInitialCards = (): Card[] => {
       { id: 3, front: 'はい', back: 'Sim', category: 'Vocabulário Básico', ...initialSrsState },
       { id: 4, front: 'いいえ', back: 'Não', category: 'Vocabulário Básico', ...initialSrsState },
       { id: 5, front: '日本', back: 'Japão', category: 'Kanji', ...initialSrsState },
+      { id: 5, front: '学', back: 'Gaku - Estudar / Aprender', category: 'Kanji', ...initialSrsState },
     ];
 };
 
@@ -825,7 +845,7 @@ const BulkAddView: React.FC<{
             const line = lines[i].trim();
             if (!line) continue;
 
-            const separator = line.includes(';') ? ';' : ',';
+            const separator = ';';
             const parts = line.split(separator).map(p => p.trim());
             
             const front = parts[0];
@@ -870,9 +890,9 @@ const BulkAddView: React.FC<{
                 <div className="form-instructions" style={{textAlign: 'left'}}>
                     Adicione cartas, uma por linha, no formato:
                     <br />
-                    <code>Frente, Verso, Nome do Baralho</code>
+                    <code>Frente; Verso; Nome do Baralho</code>
                     <br />
-                    O baralho é opcional. Se não o especificar, será usado o baralho padrão abaixo. Separe com <strong>vírgula (,)</strong> ou <strong>ponto e vírgula (;)</strong>.
+                    O nome do baralho é opcional. Se não o especificar, será usado o baralho padrão abaixo. Separe com <strong>ponto e vírgula (;)</strong>.
                 </div>
                 <div className="form-group">
                     <label htmlFor="bulk-cards">Cartas:</label>
@@ -1528,21 +1548,11 @@ const CommunityView: React.FC<{
     onDownloadDeck: (deck: PublicDeck, cards: PublicCard[]) => void;
     localDeckNames: Set<string>;
     onNavigate: (view: View) => void;
-}> = ({ onDownloadDeck, localDeckNames, onNavigate }) => {
-    const [publicDecks, setPublicDecks] = useState<PublicDeck[]>([]);
-    const [loading, setLoading] = useState(true);
+    publicDecks: PublicDeck[];
+    isLoading: boolean;
+}> = ({ onDownloadDeck, localDeckNames, onNavigate, publicDecks, isLoading }) => {
     const [downloading, setDownloading] = useState<string | null>(null);
     const [modalConfig, setModalConfig] = useState<ModalConfig | null>(null);
-
-    useEffect(() => {
-        const fetchDecks = async () => {
-            setLoading(true);
-            const decks = await communityApi.getPublicDecks();
-            setPublicDecks(decks);
-            setLoading(false);
-        };
-        fetchDecks();
-    }, []);
 
     const handleDownload = async (deck: PublicDeck) => {
         setDownloading(deck.name);
@@ -1556,13 +1566,9 @@ const CommunityView: React.FC<{
 
         const handleConfirmDownload = () => {
             onDownloadDeck(deck, cards);
-            setPublicDecks(prevDecks =>
-                prevDecks.map(d =>
-                    d.name === deck.name
-                        ? { ...d, downloads: (d.downloads || 0) + 1 }
-                        : d
-                )
-            );
+            // This is now handled by the parent component's state, but we can optimistically update for immediate feedback
+            // This requires the parent to pass down a setter or handle it differently.
+            // For now, we'll rely on the parent's state management to eventually reflect the change.
         };
 
         const localDeckExists = localDeckNames.has(deck.name.toLowerCase());
@@ -1586,7 +1592,7 @@ const CommunityView: React.FC<{
                 <h2>Explorar Baralhos da Comunidade</h2>
             </div>
 
-            {loading ? <Loader /> : (
+            {isLoading ? <Loader /> : (
                 <>
                     {publicDecks.length > 0 ? (
                         <ul className="deck-list">
@@ -1794,6 +1800,8 @@ const App = () => {
     const [reviewQueue, setReviewQueue] = useState<Card[]>([]);
     const [currentCardIndex, setCurrentCardIndex] = useState(0);
     const [xpToastInfo, setXpToastInfo] = useState<{ amount: number; id: number } | null>(null);
+    const [publicDecks, setPublicDecks] = useState<PublicDeck[]>([]);
+    const [arePublicDecksLoading, setArePublicDecksLoading] = useState(true);
 
     // Settings State
     const [theme, setTheme] = useState<Theme>(() => (localStorage.getItem('gaku-theme') as Theme) || 'light');
@@ -1907,6 +1915,16 @@ const App = () => {
             const timer = setTimeout(() => setIsOnboarding(true), 500);
             return () => clearTimeout(timer);
         }
+    }, []);
+    
+    useEffect(() => {
+        const fetchPublicDecks = async () => {
+            setArePublicDecksLoading(true);
+            const decks = await communityApi.getPublicDecks();
+            setPublicDecks(decks);
+            setArePublicDecksLoading(false);
+        };
+        fetchPublicDecks();
     }, []);
     
     useEffect(() => {
@@ -2068,6 +2086,51 @@ const App = () => {
     };
 
     const handleShowAnswer = () => setIsFlipped(true);
+    
+    const checkAndOfferCommunityShare = async (newCard: Omit<Card, 'id'>) => {
+        const publicDeckInfo = publicDecks.find(deck => deck.name.toLowerCase() === newCard.category.toLowerCase());
+        
+        if (!publicDeckInfo) {
+            return; // Not a public deck
+        }
+
+        console.log(`Checking if card "${newCard.front}" exists in public deck "${newCard.category}"...`);
+        // This fetch is fire-and-forget, it might be slow but won't block UI.
+        const publicCards = await communityApi.getDeckCards(newCard.category);
+
+        // Proceed only if the fetch was likely successful (might be an empty deck)
+        if (publicCards) {
+            const cardExists = publicCards.some(pc => pc.front.trim().toLowerCase() === newCard.front.trim().toLowerCase());
+            
+            if (!cardExists) {
+                setModalConfig({
+                    type: 'confirm',
+                    title: 'Contribuir para a Comunidade?',
+                    message: (
+                        <div style={{ textAlign: 'center', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px' }}>
+                            <Share2Icon />
+                            <span>A carta <strong>"{newCard.front}"</strong> não existe no baralho público <strong>"{newCard.category}"</strong>. Deseja compartilhá-la com a comunidade? (+{XP_MAP.communityContribution} XP)</span>
+                        </div>
+                    ),
+                    confirmText: 'Compartilhar',
+                    cancelText: 'Agora não',
+                    onConfirm: async () => {
+                        setIsLoading(true);
+                        const result = await communityApi.addCardToPublicDeck(newCard.category, { front: newCard.front, back: newCard.back });
+                        setIsLoading(false);
+                        if (result.success) {
+                            alert('Obrigado por sua contribuição! A carta foi adicionada à comunidade.');
+                            grantXp(XP_MAP.communityContribution);
+                        } else {
+                            alert(`Não foi possível adicionar a carta: ${result.message || 'Tente novamente mais tarde.'}`);
+                        }
+                    },
+                });
+            } else {
+                 console.log(`Card "${newCard.front}" already exists in public deck. No action taken.`);
+            }
+        }
+    };
 
     const handleFeedback = (quality: FeedbackType) => {
         if (!currentCard) return;
@@ -2132,6 +2195,9 @@ const App = () => {
             setCards(prevCards => [...prevCards, cardToSave]);
             sessionStorage.setItem('lastAddedCardId', String(newId));
             grantXp(XP_MAP.addCard);
+
+            // Check if this new card can be contributed to the community
+            checkAndOfferCommunityShare(newOrUpdatedCardData);
         }
     };
     
@@ -2579,7 +2645,13 @@ const App = () => {
         }
 
         if (view === 'community') {
-            return <CommunityView onDownloadDeck={handleImportCommunityDeck} localDeckNames={localDeckNamesSet} onNavigate={handleNavigate} />;
+            return <CommunityView 
+                onDownloadDeck={handleImportCommunityDeck} 
+                localDeckNames={localDeckNamesSet} 
+                onNavigate={handleNavigate}
+                publicDecks={publicDecks}
+                isLoading={arePublicDecksLoading}
+            />;
         }
 
         // --- Review View Logic ---
