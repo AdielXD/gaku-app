@@ -1,5 +1,4 @@
 
-
 import React, { useState, useMemo, useEffect, useRef, useLayoutEffect, useCallback } from 'react';
 import { createRoot } from 'react-dom/client';
 
@@ -53,7 +52,11 @@ type FeedbackType = 'again' | 'good' | 'easy';
 type DeckInfo = { name: string; count: number; };
 interface StudyDay { date: string; reviewed: number; correct: number; }
 interface PublicDeck { id?: number; name: string; cardCount: number; description: string; author: string; downloads: number; }
-type PublicCard = Omit<Card, 'id' | 'category' | 'repetitions' | 'easinessFactor' | 'interval' | 'dueDate'>;
+interface PublicCard {
+  front: string;
+  back: string;
+  downloads?: number;
+}
 
 interface UserProfile {
     streak: number;
@@ -161,7 +164,7 @@ const communityApi = {
      }
   },
 
-  addCardToPublicDeck: async (deckName: string, card: PublicCard): Promise<{success: boolean, message?: string}> => {
+  addCardToPublicDeck: async (deckName: string, card: { front: string; back: string }): Promise<{success: boolean, message?: string}> => {
      try {
         const response = await fetch('/.netlify/functions/add-card-to-deck', {
             method: 'POST',
@@ -177,6 +180,34 @@ const communityApi = {
         console.error("Error adding card to public deck:", error);
         return { success: false, message: error.message };
      }
+  },
+
+  recordDeckDownload: async (deckName: string): Promise<{success: boolean}> => {
+      try {
+          const response = await fetch('/.netlify/functions/record-deck-download', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ deckName }),
+          });
+          return { success: response.ok };
+      } catch (error) {
+          console.error("Error recording deck download:", error);
+          return { success: false };
+      }
+  },
+
+  recordCardDownload: async (deckName: string, cardFront: string): Promise<{success: boolean}> => {
+      try {
+          const response = await fetch('/.netlify/functions/record-card-download', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ deckName, cardFront }),
+          });
+          return { success: response.ok };
+      } catch (error) {
+          console.error("Error recording card download:", error);
+          return { success: false };
+      }
   },
 };
 
@@ -1563,6 +1594,7 @@ const CommunityView: React.FC<{
 
     const handleDownloadAll = async (deck: PublicDeck) => {
         setDownloading(deck.name);
+        await communityApi.recordDeckDownload(deck.name);
         const cards = await communityApi.getDeckCards(deck.name);
         setDownloading(null);
         
@@ -1633,6 +1665,9 @@ const CommunityView: React.FC<{
                                     <div className="card-list-text">
                                         <span className="card-list-front">{card.front}</span>
                                         <span className="card-list-back">{card.back}</span>
+                                    </div>
+                                    <div className="card-list-meta">
+                                        <span className="download-count"><DownloadIcon/> {card.downloads || 0}</span>
                                     </div>
                                     <div className="card-list-actions">
                                         {isDownloaded ? (
@@ -2624,6 +2659,9 @@ const App = () => {
             alert(`A carta "${card.front}" já existe no seu baralho "${targetDeckName}".`);
             return;
         }
+        
+        // Fire-and-forget the download recording so the UI is not blocked
+        communityApi.recordCardDownload(deckName, card.front);
     
         let maxId = cards.length > 0 ? Math.max(...cards.map(c => c.id)) + 1 : 1;
         const today = new Date().toISOString();

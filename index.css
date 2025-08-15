@@ -597,6 +597,7 @@ html[data-theme="dark"] .flashcard-face > div.has-scroll-indicator {
     box-shadow: 0 1px 2px rgba(0,0,0,0.05);
     border-left: 5px solid transparent;
     transition: background-color 0.3s ease, border-color 0.3s ease;
+    gap: 8px;
 }
 .card-list-item.affinity-low { border-color: var(--srs-red); }
 .card-list-item.affinity-mid { border-color: var(--srs-blue); }
@@ -607,11 +608,23 @@ html[data-theme="dark"] .flashcard-face > div.has-scroll-indicator {
     flex-direction: column;
     gap: 2px;
     flex-grow: 1;
-    margin-right: 12px;
     overflow: hidden;
 }
 .card-list-front { font-weight: bold; font-size: 1.1rem; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
 .card-list-back { color: var(--secondary-text-color); white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
+
+.card-list-meta {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--secondary-text-color);
+    font-size: 0.9rem;
+    flex-shrink: 0;
+}
+.card-list-meta svg {
+    width: 16px;
+    height: 16px;
+}
 
 .card-list-actions {
     display: flex;
