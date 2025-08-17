@@ -143,7 +143,7 @@ const communityApi = {
     }
   },
 
-  uploadDeck: async (deckData: Omit<PublicDeck, 'cardCount' | 'downloads'>, cards: Card[]): Promise<{success: boolean, message?: string}> => {
+  uploadDeck: async (deckData: Omit<PublicDeck, 'cardCount' | 'downloads'>, cards: Card[] | { front: string, back: string }[]): Promise<{success: boolean, message?: string}> => {
      try {
         const response = await fetch('/.netlify/functions/upload-deck', {
             method: 'POST',
@@ -1031,7 +1031,8 @@ const DeckCardList: React.FC<{
     onEditCard: (card: Card) => void;
     onPractice: (deckName: string) => void;
     onMoveCard: (card: Card) => void;
-}> = ({ deckName, cards, onBack, onEditCard, onPractice, onMoveCard }) => {
+    onShareCard: (card: Card) => void;
+}> = ({ deckName, cards, onBack, onEditCard, onPractice, onMoveCard, onShareCard }) => {
     const listRef = useRef<HTMLUListElement>(null);
     const [newCardId, setNewCardId] = useState<number | null>(null);
 
@@ -1076,6 +1077,7 @@ const DeckCardList: React.FC<{
                                 <span className="card-list-back">{card.back}</span>
                             </div>
                             <div className="card-list-actions">
+                                <button className="deck-action-btn share" onClick={() => onShareCard(card)} title="Compartilhar com a Comunidade"><Share2Icon/></button>
                                 <button className="deck-action-btn move" onClick={() => onMoveCard(card)} title="Mover Carta"><ArrowRightLeftIcon/></button>
                                 <button className="edit-card-btn" onClick={() => onEditCard(card)} title="Editar Carta"><PencilIcon/></button>
                             </div>
@@ -1894,6 +1896,7 @@ const App = () => {
     const [feedbackState, setFeedbackState] = useState('');
     const [modalConfig, setModalConfig] = useState<ModalConfig | null>(null);
     const [deckToShare, setDeckToShare] = useState<string | null>(null);
+    const [cardToShare, setCardToShare] = useState<Card | null>(null);
     const [notificationPermission, setNotificationPermission] = useState<NotificationPermissionStatus>('default');
     const [isLoading, setIsLoading] = useState(false);
     const [reviewQueue, setReviewQueue] = useState<Card[]>([]);
@@ -2434,28 +2437,83 @@ const App = () => {
         setDeckToShare(deckName);
     };
 
+    const handleShareCard = async (card: Card) => {
+        setIsLoading(true);
+        const deckExists = await communityApi.checkDeckExists(card.category);
+        
+        if (deckExists) {
+            const publicCards = await communityApi.getDeckCards(card.category);
+            setIsLoading(false);
+            const cardExistsInPublicDeck = publicCards.some(pc => pc.front.trim().toLowerCase() === card.front.trim().toLowerCase());
+
+            if (cardExistsInPublicDeck) {
+                alert(`A carta "${card.front}" já existe no baralho público "${card.category}".`);
+                return;
+            }
+
+            setModalConfig({
+                type: 'confirm',
+                title: 'Contribuir para a Comunidade?',
+                message: `Deseja adicionar a carta "${card.front}" ao baralho público existente "${card.category}"? (+${XP_MAP.communityContribution} XP)`,
+                confirmText: 'Compartilhar',
+                onConfirm: async () => {
+                    setIsLoading(true);
+                    const result = await communityApi.addCardToPublicDeck(card.category, { front: card.front, back: card.back });
+                    setIsLoading(false);
+                    if (result.success) {
+                        alert('Obrigado pela contribuição! A carta foi compartilhada.');
+                        grantXp(XP_MAP.communityContribution);
+                    } else {
+                        alert(`Falha ao compartilhar: ${result.message || 'Tente novamente.'}`);
+                    }
+                },
+            });
+
+        } else {
+            // Deck does not exist, trigger the full share deck flow for this one card
+            setIsLoading(false);
+            setCardToShare(card);
+            setDeckToShare(card.category);
+        }
+    };
+
     const handleConfirmShare = async (description: string, author: string) => {
         if (!deckToShare) return;
 
         setIsLoading(true);
-        const remoteExists = await communityApi.checkDeckExists(deckToShare);
-        if (remoteExists) {
+        // This check is now only for the full-deck share flow
+        if (!cardToShare) {
+            const remoteExists = await communityApi.checkDeckExists(deckToShare);
+            if (remoteExists) {
+                setIsLoading(false);
+                alert(`Um baralho com o nome "${deckToShare}" já foi compartilhado na comunidade. Por favor, renomeie o seu baralho se quiser compartilhá-lo.`);
+                setDeckToShare(null);
+                return;
+            }
+        }
+
+        const cardsToUpload = cardToShare
+            ? [cardToShare]
+            : cards.filter(c => c.category === deckToShare && c.repetitions !== -1);
+        
+        if (cardsToUpload.length === 0) {
             setIsLoading(false);
-            alert(`Um baralho com o nome "${deckToShare}" já foi compartilhado na comunidade. Por favor, renomeie o seu baralho se quiser compartilhá-lo.`);
+            alert("Não há cartas para compartilhar.");
             setDeckToShare(null);
+            setCardToShare(null);
             return;
         }
 
-        const cardsToShare = cards.filter(c => c.category === deckToShare && c.repetitions !== -1);
         const deckData = { name: deckToShare, description, author };
-
-        const result = await communityApi.uploadDeck(deckData, cardsToShare);
+        const result = await communityApi.uploadDeck(deckData, cardsToUpload);
+        
         setIsLoading(false);
         setDeckToShare(null);
+        setCardToShare(null); // Always reset this
 
         if (result.success) {
             alert(`Baralho "${deckToShare}" compartilhado com a comunidade com sucesso!`);
-            grantXp(XP_MAP.uploadDeck);
+            grantXp(XP_MAP.uploadDeck); // Creating a new deck is always a big contribution
         } else {
             alert(`Falha ao compartilhar o baralho: ${result.message || 'Erro desconhecido.'}`);
         }
@@ -2743,6 +2801,7 @@ const App = () => {
                     onEditCard={handleEditCard}
                     onPractice={setPracticeDeck}
                     onMoveCard={handleMoveCard}
+                    onShareCard={handleShareCard}
                 />
             }
             return <DeckList 
@@ -3020,6 +3079,7 @@ const App = () => {
                     onConfirm={handleConfirmShare}
                     onCancel={() => {
                         setDeckToShare(null);
+                        setCardToShare(null);
                         setIsLoading(false);
                     }}
                     isLoading={isLoading}
