@@ -118,7 +118,7 @@ const communityApi = {
 
   getDeckCards: async (deckName: string): Promise<PublicCard[]> => {
      try {
-        const response = await fetch(`/.netlify/functions/download-deck?name=${encodeURIComponent(deckName)}`);
+        const response = await fetch(`/.netlify/functions/get-deck-cards?name=${encodeURIComponent(deckName)}`);
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
