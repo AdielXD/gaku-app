@@ -24,7 +24,7 @@ exports.handler = async function(event, context) {
     const { data: deck, error: deckError } = await supabase
       .from('decks')
       .select('id')
-      .eq('name', deckName.trim())
+      .ilike('name', deckName.trim())
       .single();
 
     if (deckError || !deck) {

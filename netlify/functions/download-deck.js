@@ -3,8 +3,6 @@ const { createClient } = require('@supabase/supabase-js');
 
 exports.handler = async function(event, context) {
   const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
-
-  // 1. Recebe o NOME do baralho, como o frontend envia.
   const deckName = event.queryStringParameters.name;
 
   if (!deckName) {
@@ -12,20 +10,23 @@ exports.handler = async function(event, context) {
   }
 
   try {
-    // 2. Procura o baralho pelo NOME para obter o seu ID e as suas cartas.
+    // Usamos .ilike() para busca case-insensitive, como boa prática
     const { data: deck, error } = await supabase
       .from('decks')
-      .select('id, cards (front, back)')
-      .eq('name', deckName)
+      .select('id, cards (front, back, downloads)')
+      .ilike('name', deckName) // Boa prática: busca 'case-insensitive'
       .single();
 
     if (error || !deck) {
       return { statusCode: 404, body: JSON.stringify({ error: 'Baralho não encontrado.' }) };
     }
 
-    // 3. Usa o ID que encontrámos para incrementar o contador de downloads.
-    //    A sua função 'increment_downloads' no Supabase, que espera um ID, já está correta para isto.
+    // --- LÓGICA DE INCREMENTO ---
+    // 1. Incrementa o contador do BARALHO
     await supabase.rpc('increment_downloads', { deck_id_to_increment: deck.id });
+
+    // 2. (NOVO!) Incrementa o contador de TODAS AS CARTAS no baralho
+    await supabase.rpc('increment_deck_cards_downloads', { deck_id_to_increment: deck.id });
 
     return {
       statusCode: 200,
