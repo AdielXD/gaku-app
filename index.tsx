@@ -388,7 +388,7 @@ const getInitialCards = (): Card[] => {
       { id: 3, front: 'はい', back: 'Sim', category: 'Vocabulário Básico', ...initialSrsState },
       { id: 4, front: 'いいえ', back: 'Não', category: 'Vocabulário Básico', ...initialSrsState },
       { id: 5, front: '日本', back: 'Japão', category: 'Kanji', ...initialSrsState },
-      { id: 5, front: '学', back: 'Gaku - Estudar / Aprender', category: 'Kanji', ...initialSrsState },
+      { id: 6, front: '学', back: 'Gaku - Estudar / Aprender', category: 'Kanji', ...initialSrsState },
     ];
 };
 
@@ -2008,7 +2008,7 @@ const App = () => {
     
     useEffect(() => {
         const onboardingComplete = localStorage.getItem('gaku-onboarding-complete');
-        if (onboardingComplete !== 'true' && cards.length <= 5) {
+        if (onboardingComplete !== 'true' && cards.length <= 6) {
             // Delay start to allow UI to render
             const timer = setTimeout(() => setIsOnboarding(true), 500);
             return () => clearTimeout(timer);
