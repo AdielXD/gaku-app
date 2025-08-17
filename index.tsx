@@ -1955,7 +1955,7 @@ const App = () => {
          });
          // Make sure decks with only placeholder cards are still listed (as count 0)
          const allCategories = new Set(cards.map(c => c.category));
-         allCategories.forEach(cat => {
+         allCategories.forEach((cat: string) => {
             if (!deckMap.has(cat)) {
                 deckMap.set(cat, 0);
             }
