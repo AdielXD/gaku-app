@@ -482,6 +482,13 @@ html[data-theme="dark"] .flashcard-face > div.has-scroll-indicator {
   color: var(--srs-blue);
 }
 
+.deck-action-btn.download.partial {
+  color: var(--srs-gold);
+}
+.deck-action-btn.download.partial:hover:not(:disabled) {
+  color: #c79100;
+}
+
 .deck-action-btn.owned {
   color: var(--srs-green);
   cursor: default;

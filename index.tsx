@@ -1591,8 +1591,55 @@ const CommunityView: React.FC<{
     const [expandedDeck, setExpandedDeck] = useState<PublicDeck | null>(null);
     const [deckCards, setDeckCards] = useState<PublicCard[]>([]);
     const [areCardsLoading, setAreCardsLoading] = useState(false);
+    const [deckStatuses, setDeckStatuses] = useState<Record<string, 'owned' | 'partial' | 'unowned'>>({});
+    const [areStatusesLoading, setAreStatusesLoading] = useState(false);
     
     const localDeckNamesSet = useMemo(() => new Set(localCards.map(c => c.category.toLowerCase())), [localCards]);
+
+    useEffect(() => {
+        if (publicDecks.length > 0 && !isLoading) {
+            const checkDeckStatuses = async () => {
+                setAreStatusesLoading(true);
+                const newStatuses: Record<string, 'owned' | 'partial' | 'unowned'> = {};
+                
+                await Promise.all(publicDecks.map(async (deck) => {
+                    const localDeckNameLower = deck.name.toLowerCase();
+                    const localDeckExists = localDeckNamesSet.has(localDeckNameLower);
+
+                    if (!localDeckExists) {
+                        newStatuses[deck.name] = 'unowned';
+                        return;
+                    }
+
+                    try {
+                        const communityCards = await communityApi.getDeckCards(deck.name);
+                        if (!communityCards || communityCards.length === 0) {
+                            const localCardsInDeck = localCards.filter(c => c.category.toLowerCase() === localDeckNameLower);
+                            newStatuses[deck.name] = localCardsInDeck.length > 0 ? 'partial' : 'owned';
+                            return;
+                        }
+
+                        const localCardsInDeck = localCards.filter(c => c.category.toLowerCase() === localDeckNameLower);
+                        const localCardFronts = new Set(localCardsInDeck.map(c => c.front.toLowerCase()));
+                        const hasAllCards = communityCards.every(cc => localCardFronts.has(cc.front.toLowerCase()));
+
+                        if (hasAllCards) {
+                            newStatuses[deck.name] = 'owned';
+                        } else {
+                            newStatuses[deck.name] = 'partial';
+                        }
+                    } catch (error) {
+                        console.error(`Failed to get status for deck ${deck.name}`, error);
+                        newStatuses[deck.name] = 'unowned'; // Fail safe
+                    }
+                }));
+
+                setDeckStatuses(newStatuses);
+                setAreStatusesLoading(false);
+            };
+            checkDeckStatuses();
+        }
+    }, [publicDecks, localCards, isLoading, localDeckNamesSet]);
 
     const handleDownloadAll = async (deck: PublicDeck) => {
         setDownloading(deck.name);
@@ -1705,7 +1752,11 @@ const CommunityView: React.FC<{
                 <>
                     {publicDecks.length > 0 ? (
                         <ul className="deck-list">
-                            {publicDecks.map((deck) => (
+                            {publicDecks.map((deck) => {
+                                const status = deckStatuses[deck.name];
+                                const isStatusLoading = areStatusesLoading && !status;
+
+                                return (
                                 <li key={deck.id || deck.name} className="deck-list-item">
                                     <div className="deck-item-main" onClick={() => handleExpandDeck(deck)} style={{ cursor: 'pointer', flexDirection: 'column', alignItems: 'flex-start', gap: '8px' }}>
                                         <div style={{width: '100%', display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
@@ -1719,17 +1770,35 @@ const CommunityView: React.FC<{
                                         </div>
                                     </div>
                                     <div className="deck-item-actions">
-                                        <button 
-                                            onClick={(e) => { e.stopPropagation(); handleDownloadAll(deck); }} 
-                                            className="deck-action-btn download" 
-                                            title={`Baixar todo o baralho ${deck.name} (+${XP_MAP.downloadDeck} XP)`}
-                                            disabled={downloading !== null}
-                                        >
-                                            {downloading === deck.name ? <Loader isSmall={true} /> : <CloudDownloadIcon/>}
-                                        </button>
+                                         {isStatusLoading || downloading === deck.name ? (
+                                            <div className="deck-action-btn" style={{ cursor: 'default' }}>
+                                                <Loader isSmall={true} />
+                                            </div>
+                                        ) : status === 'owned' ? (
+                                            <button
+                                                className="deck-action-btn owned"
+                                                title="Você já possui todas as cartas deste baralho."
+                                                disabled
+                                            >
+                                                <CheckCircleIcon />
+                                            </button>
+                                        ) : (
+                                            <button
+                                                onClick={(e) => { e.stopPropagation(); handleDownloadAll(deck); }}
+                                                className={`deck-action-btn download ${status === 'partial' ? 'partial' : ''}`}
+                                                title={status === 'partial'
+                                                    ? `Atualizar baralho. Faltam cartas. (+${XP_MAP.downloadDeck} XP)`
+                                                    : `Baixar todo o baralho ${deck.name} (+${XP_MAP.downloadDeck} XP)`
+                                                }
+                                                disabled={downloading !== null}
+                                            >
+                                                <CloudDownloadIcon />
+                                            </button>
+                                        )}
                                     </div>
                                 </li>
-                            ))}
+                                );
+                            })}
                         </ul>
                     ) : (
                         <div className="empty-state-container">
